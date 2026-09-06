@@ -1,0 +1,2 @@
+"""Contract RAG package."""
+
