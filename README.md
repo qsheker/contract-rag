@@ -19,7 +19,23 @@ uv run ruff check .
 
 Первый корпус публичных шаблонов договоров хранится в `corpus_raw/contracts/`.
 
-Следующий этап (ALD-9) — реализовать в `contract_rag.loader` постраничное извлечение
-текста из PDF через PyMuPDF с сохранением номера страницы. Зависимость и namespace
-подготовлены, но Loader пока не реализован.
+Loader извлекает и очищает текст каждого PDF постранично, сохраняя номер страницы
+и исходный путь:
 
+```python
+from contract_rag.loader import LoaderError, NoTextLayerError, load_pdf
+
+try:
+    pages = load_pdf("corpus_raw/contracts/contract_01.pdf")
+except NoTextLayerError:
+    # OCR намеренно не входит в текущий Loader.
+    raise
+except LoaderError as error:
+    print(error.code, error.source_file)
+
+for page in pages:
+    print(page.page_number, page.source_file, page.text[:80])
+```
+
+`load_pdf()` удаляет повторяющиеся граничные строки и исправляет переносы слов.
+Chunking, определение пунктов, OCR и HTTP API остаются за пределами Loader.
