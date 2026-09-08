@@ -39,3 +39,37 @@ for page in pages:
 
 `load_pdf()` удаляет повторяющиеся граничные строки и исправляет переносы слов.
 Chunking, определение пунктов, OCR и HTTP API остаются за пределами Loader.
+
+## Разбиение по пунктам
+
+Chunker применяет фиксированный приоритет generic-стратегий без определения типа
+договора: dotted numbering, verbose Article/Section, затем ненумерованные заголовки.
+
+```python
+from contract_rag.chunker import UnsupportedNumberingError, chunk_by_clause
+from contract_rag.loader import load_pdf
+
+pages = load_pdf("corpus_raw/contracts/contract_01.pdf")
+
+try:
+    chunks = chunk_by_clause(pages)
+except UnsupportedNumberingError:
+    # Автоматический token-based fallback намеренно отсутствует.
+    raise
+
+for chunk in chunks:
+    print(chunk.clause_id, chunk.page_number, chunk.detected_strategy)
+```
+
+Преамбула сохраняется отдельным чанком с `clause_id=None`. Если пункт продолжается
+на следующей странице, он остаётся одним чанком, привязанным к странице начала.
+
+### Стратегии на эталонном корпусе
+
+| Файл | Результат |
+| --- | --- |
+| `contract_01.pdf` | `dotted_numbering` |
+| `contract_02.pdf` | `verbose_numbering` |
+| `contract_03.pdf` | `heading_only` |
+| `contract_04.pdf` | `UnsupportedNumberingError` — плоская нумерация вне текущего набора стратегий |
+| `contract_05.pdf` | `heading_only` |
