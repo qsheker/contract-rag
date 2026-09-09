@@ -127,6 +127,7 @@ def test_prompt_carries_every_chunk_with_its_citation_metadata() -> None:
     chunks = [
         make_chunk("1.1", text="Первый пункт.", page_number=1),
         make_chunk(None, text="Преамбула.", page_number=2),
+        make_chunk("3.1", text="Из DOCX.", page_number=None, source_file="agreement.docx"),
     ]
 
     generate_answer("Вопрос?", chunks, model=TEST_MODEL, completion_fn=completion)
@@ -134,11 +135,13 @@ def test_prompt_carries_every_chunk_with_its_citation_metadata() -> None:
     user_message = completion.calls[0]["messages"][1]["content"]
     assert "Первый пункт." in user_message
     assert "Преамбула." in user_message
+    assert "Из DOCX." in user_message
     assert "clause_id: 1.1" in user_message
     assert "page_number: 1" in user_message
-    # A preamble has no clause of its own; it must reach the model as null so the
-    # model copies null back instead of inventing a clause number.
+    # A preamble has no clause of its own and a DOCX has no pages; both must reach
+    # the model as null so it copies null back instead of inventing a reference.
     assert "clause_id: null" in user_message
+    assert "page_number: null" in user_message
     assert "Question: Вопрос?" in user_message
 
 
@@ -251,3 +254,31 @@ def test_system_prompt_forbids_outside_knowledge_and_requires_citations() -> Non
     assert "empty `citations`" in SYSTEM_PROMPT
     assert "clause_id" in SYSTEM_PROMPT
     assert "page_number" in SYSTEM_PROMPT
+
+
+def test_citation_to_a_pageless_chunk_is_accepted() -> None:
+    chunk = make_chunk("2.2", page_number=None, source_file="agreement.docx")
+    completion = FakeCompletion(
+        answer_payload(
+            "Оплата в течение 10 дней.",
+            [{"clause_id": "2.2", "page_number": None, "source_file": "agreement.docx"}],
+        )
+    )
+
+    answer = generate_answer("Вопрос?", [chunk], model=TEST_MODEL, completion_fn=completion)
+
+    assert answer.citations[0].page_number is None
+    assert answer.citations[0].clause_id == "2.2"
+
+
+def test_page_invented_for_a_pageless_chunk_is_rejected() -> None:
+    chunk = make_chunk("2.2", page_number=None, source_file="agreement.docx")
+    completion = FakeCompletion(
+        answer_payload(
+            "Оплата в течение 10 дней.",
+            [{"clause_id": "2.2", "page_number": 1, "source_file": "agreement.docx"}],
+        )
+    )
+
+    with pytest.raises(GenerationError, match="not supplied"):
+        generate_answer("Вопрос?", [chunk], model=TEST_MODEL, completion_fn=completion)
