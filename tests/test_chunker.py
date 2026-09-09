@@ -183,3 +183,32 @@ def test_corpus_strategy_outcome(filename: str, expected_strategy: str | None) -
     assert all(chunk.detected_strategy == expected_strategy for chunk in chunks)
     assert all(chunk.source_file == str(CORPUS_DIR / filename) for chunk in chunks)
     assert all(chunk.page_number >= 1 for chunk in chunks)
+
+
+def test_pageless_document_yields_chunks_without_a_page_number() -> None:
+    pages = [
+        PageText(
+            page_number=None,
+            text=(
+                "Agreement preamble\n1.1 First clause\nBody\n"
+                "1.2 Second clause\nMore body\n1.3 Third clause\nTail"
+            ),
+            source_file="agreement.docx",
+        )
+    ]
+
+    chunks = chunk_by_clause(pages)
+
+    assert [chunk.clause_id for chunk in chunks] == [None, "1.1", "1.2", "1.3"]
+    assert all(chunk.page_number is None for chunk in chunks)
+    assert all(chunk.source_file == "agreement.docx" for chunk in chunks)
+
+
+def test_several_pageless_pages_are_rejected() -> None:
+    pages = [
+        PageText(page_number=None, text="1.1 First\n1.2 Second", source_file="agreement.docx"),
+        PageText(page_number=None, text="1.3 Third\n1.4 Fourth", source_file="agreement.docx"),
+    ]
+
+    with pytest.raises(ValueError, match="single page"):
+        chunk_by_clause(pages)

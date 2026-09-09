@@ -1,4 +1,4 @@
-"""Page-oriented PDF text extraction and deterministic cleanup."""
+"""Page-oriented document text extraction and deterministic cleanup."""
 
 from __future__ import annotations
 
@@ -6,21 +6,32 @@ import math
 import os
 import re
 from collections import Counter
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 
+import docx
 import pymupdf
+from docx.opc.exceptions import PackageNotFoundError
+from docx.oxml.ns import qn
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 
 
 @dataclass(frozen=True, slots=True)
 class PageText:
-    """Text extracted from one page together with its source provenance."""
+    """Text extracted from one page together with its source provenance.
 
-    page_number: int
+    ``page_number`` is ``None`` for formats that carry no page boundaries.
+    """
+
+    page_number: int | None
     text: str
     source_file: str
 
     def __post_init__(self) -> None:
+        if self.page_number is None:
+            return
         if isinstance(self.page_number, bool) or not isinstance(self.page_number, int):
             raise ValueError("page_number must be an integer greater than or equal to 1")
         if self.page_number < 1:
@@ -28,17 +39,20 @@ class PageText:
 
 
 class LoaderErrorCode(StrEnum):
-    """Stable machine-readable codes for expected PDF loading failures."""
+    """Stable machine-readable codes for expected document loading failures."""
 
     FILE_NOT_FOUND = "file_not_found"
     PATH_IS_DIRECTORY = "path_is_directory"
     INVALID_PDF = "invalid_pdf"
     PASSWORD_PROTECTED = "password_protected"
     NO_TEXT_LAYER = "no_text_layer"
+    INVALID_DOCX = "invalid_docx"
+    INVALID_ENCODING = "invalid_encoding"
+    UNSUPPORTED_FORMAT = "unsupported_format"
 
 
 class LoaderError(Exception):
-    """Expected failure while opening or reading a PDF."""
+    """Expected failure while opening or reading a document."""
 
     def __init__(
         self,
@@ -52,13 +66,30 @@ class LoaderError(Exception):
 
 
 class NoTextLayerError(LoaderError):
-    """Raised when an openable PDF has no extractable text on any page."""
+    """Raised when an openable document has no extractable text."""
 
-    def __init__(self, source_file: str) -> None:
+    def __init__(self, source_file: str, document_format: str = "PDF") -> None:
         super().__init__(
             code=LoaderErrorCode.NO_TEXT_LAYER,
             source_file=source_file,
-            message=f"PDF has no extractable text layer: {source_file}",
+            message=f"{document_format} has no extractable text layer: {source_file}",
+        )
+
+
+class UnsupportedFormatError(LoaderError):
+    """Raised when a path carries an extension no loader handles."""
+
+    def __init__(self, source_file: str, extension: str) -> None:
+        self.extension = extension
+        described_extension = extension or "(no extension)"
+        supported = ", ".join(sorted(SUPPORTED_EXTENSIONS))
+        super().__init__(
+            code=LoaderErrorCode.UNSUPPORTED_FORMAT,
+            source_file=source_file,
+            message=(
+                f"Unsupported document format {described_extension}: {source_file}. "
+                f"Supported formats: {supported}"
+            ),
         )
 
 
@@ -86,19 +117,7 @@ def load_pdf(path: str | os.PathLike[str]) -> list[PageText]:
     every returned ``PageText.source_file`` value.
     """
 
-    source_file = os.fspath(path)
-    if not os.path.exists(source_file):
-        raise LoaderError(
-            LoaderErrorCode.FILE_NOT_FOUND,
-            source_file,
-            f"PDF file does not exist: {source_file}",
-        )
-    if os.path.isdir(source_file):
-        raise LoaderError(
-            LoaderErrorCode.PATH_IS_DIRECTORY,
-            source_file,
-            f"Expected a PDF file but received a directory: {source_file}",
-        )
+    source_file = _require_readable_file(path, "PDF")
 
     try:
         document = pymupdf.open(source_file)
@@ -156,6 +175,118 @@ def load_pdf(path: str | os.PathLike[str]) -> list[PageText]:
         )
         for page in pages_without_boilerplate
     ]
+
+
+def load_docx(path: str | os.PathLike[str]) -> list[PageText]:
+    """Load a whole DOCX as a single page.
+
+    DOCX stores no page boundaries: they are produced when a renderer applies
+    fonts and margins, not recorded in the file. ``page_number`` is therefore
+    ``None`` rather than an invented number, and citations from DOCX sources
+    can carry a clause but no page.
+    """
+
+    source_file = _require_readable_file(path, "DOCX")
+    try:
+        document = docx.Document(source_file)
+    except (PackageNotFoundError, ValueError) as error:
+        raise LoaderError(
+            LoaderErrorCode.INVALID_DOCX,
+            source_file,
+            f"File is not a readable DOCX: {source_file}",
+        ) from error
+
+    text = join_hyphenation("\n".join(_iter_docx_blocks(document))).strip()
+    if not text:
+        raise NoTextLayerError(source_file, document_format="DOCX")
+
+    return [PageText(page_number=None, text=text, source_file=source_file)]
+
+
+def load_txt(path: str | os.PathLike[str]) -> list[PageText]:
+    """Load a whole plain-text file as a single page.
+
+    Plain text has no notion of a page at all, so ``page_number`` is ``None``.
+    """
+
+    source_file = _require_readable_file(path, "TXT")
+    try:
+        # utf-8-sig also strips the BOM that Windows editors prepend.
+        with open(source_file, encoding="utf-8-sig") as handle:
+            raw_text = handle.read()
+    except UnicodeDecodeError as error:
+        raise LoaderError(
+            LoaderErrorCode.INVALID_ENCODING,
+            source_file,
+            f"TXT file is not valid UTF-8: {source_file}",
+        ) from error
+
+    text = join_hyphenation(raw_text).strip()
+    if not text:
+        raise NoTextLayerError(source_file, document_format="TXT")
+
+    return [PageText(page_number=None, text=text, source_file=source_file)]
+
+
+# Registry rather than an if-chain: a new format is one entry plus its loader.
+_LOADERS: dict[str, Callable[[str | os.PathLike[str]], list[PageText]]] = {
+    ".pdf": load_pdf,
+    ".docx": load_docx,
+    ".txt": load_txt,
+}
+
+SUPPORTED_EXTENSIONS = frozenset(_LOADERS)
+
+
+def load_document(path: str | os.PathLike[str]) -> list[PageText]:
+    """Load any supported document, dispatching on the file extension.
+
+    Callers that already know the format may keep using ``load_pdf``,
+    ``load_docx`` or ``load_txt`` directly.
+    """
+
+    source_file = os.fspath(path)
+    extension = os.path.splitext(source_file)[1].lower()
+    loader = _LOADERS.get(extension)
+    if loader is None:
+        raise UnsupportedFormatError(source_file, extension)
+    return loader(path)
+
+
+def _require_readable_file(path: str | os.PathLike[str], document_format: str) -> str:
+    """Return the path as a string once it is known to be an existing file."""
+
+    source_file = os.fspath(path)
+    if not os.path.exists(source_file):
+        raise LoaderError(
+            LoaderErrorCode.FILE_NOT_FOUND,
+            source_file,
+            f"{document_format} file does not exist: {source_file}",
+        )
+    if os.path.isdir(source_file):
+        raise LoaderError(
+            LoaderErrorCode.PATH_IS_DIRECTORY,
+            source_file,
+            f"Expected a {document_format} file but received a directory: {source_file}",
+        )
+    return source_file
+
+
+def _iter_docx_blocks(document: docx.document.Document) -> Iterator[str]:
+    """Yield paragraph and table text in document order, one line per block.
+
+    Tables are included because contract details - parties, bank details,
+    payment schedules - routinely live in them, and dropping them would lose
+    text the answer must be able to cite.
+    """
+
+    for child in document.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            yield Paragraph(child, document).text
+        elif child.tag == qn("w:tbl"):
+            for row in Table(child, document).rows:
+                # One row per line keeps the line-based clause strategies working.
+                yield "\t".join(_WHITESPACE_RUN.sub(" ", cell.text).strip() for cell in row.cells)
 
 
 def strip_boilerplate(pages: list[PageText]) -> list[PageText]:
