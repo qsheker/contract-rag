@@ -29,7 +29,7 @@ class _SentenceTransformerModel(Protocol):
     max_seq_length: int
     tokenizer: Any
 
-    def get_sentence_embedding_dimension(self) -> int | None: ...
+    def get_embedding_dimension(self) -> int | None: ...
 
     def encode(self, sentences: list[str], **kwargs: Any) -> Any: ...
 
@@ -49,7 +49,7 @@ class RoSBERTaEmbedder:
 
             model = cast(_SentenceTransformerModel, SentenceTransformer(MODEL_NAME))
 
-        dimension = model.get_sentence_embedding_dimension()
+        dimension = model.get_embedding_dimension()
         if dimension != EMBEDDING_DIMENSION:
             raise ValueError(
                 f"{MODEL_NAME} must produce {EMBEDDING_DIMENSION}-dimensional embeddings; "
