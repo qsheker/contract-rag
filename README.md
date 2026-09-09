@@ -73,3 +73,40 @@ for chunk in chunks:
 | `contract_03.pdf` | `heading_only` |
 | `contract_04.pdf` | `UnsupportedNumberingError` — плоская нумерация вне текущего набора стратегий |
 | `contract_05.pdf` | `heading_only` |
+
+## Эмбеддинги и Supabase
+
+Индексатор использует `ai-forever/ru-en-RoSBERTa` и хранит 1024-мерные векторы
+в таблице Supabase `contract_chunks`. Исходный текст и все метаданные чанка
+записываются вместе с вектором.
+
+Перед первым запуском:
+
+1. Создайте или выберите проект Supabase.
+2. Выполните `migrations/001_create_contract_chunks.sql` в SQL Editor проекта.
+3. Создайте локальный `.env` — этот файл исключён из Git:
+
+```dotenv
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your-project-key
+```
+
+Пример индексации уже подготовленного списка чанков:
+
+```python
+from contract_rag.embeddings import create_supabase_client_from_env, embed_and_index
+
+supabase = create_supabase_client_from_env()
+embed_and_index(chunks, supabase)
+```
+
+`embed_and_index()` сам добавляет `search_document: ` перед кодированием и
+делает upsert по `id`, поэтому повторный запуск не создаёт дубликаты. В поле
+`text` всегда остаётся полный текст. Если вход длиннее 512 токенов, только вход
+модели автоматически обрезается, а лог содержит warning с исходным файлом и
+номером пункта.
+
+Базовый ID имеет формат `source_file::clause_id` или
+`source_file::preamble`. В многоязычных документах номер пункта может повторяться.
+Чтобы не перезаписать один язык другим, коллизии получают детерминированный суффикс
+страницы и порядкового номера.
