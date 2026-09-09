@@ -25,7 +25,7 @@ class FakeModel:
         self.encoded_texts: list[str] = []
         self.tokenizer = self._tokenize
 
-    def get_sentence_embedding_dimension(self) -> int:
+    def get_embedding_dimension(self) -> int:
         return EMBEDDING_DIMENSION
 
     def encode(self, sentences: list[str], **kwargs: Any) -> list[list[float]]:
