@@ -74,6 +74,39 @@ for chunk in chunks:
 | `contract_04.pdf` | `UnsupportedNumberingError` — плоская нумерация вне текущего набора стратегий |
 | `contract_05.pdf` | `heading_only` |
 
+## Миграции
+
+Схема базы живёт в `supabase/migrations/` и накатывается Supabase CLI — вручную
+через SQL Editor ничего копировать не нужно.
+
+```bash
+brew install supabase/tap/supabase
+supabase login
+supabase link --project-ref <project-ref>
+supabase db push
+```
+
+`supabase login` и `link` делаются один раз на машину: CLI спрашивает пароль базы
+и хранит привязку в `supabase/.temp/`, который исключён из Git. Дальше
+`supabase db push` применяет только те миграции, которых ещё нет в базе, и сам
+ведёт их учёт.
+
+Обе текущие миграции идемпотентны (`create table if not exists`,
+`create or replace function`), поэтому `db push` на уже настроенную базу
+безопасен и просто зафиксирует их как применённые.
+
+Новая миграция создаётся так — CLI сам проставит таймстамп в имени, порядок
+применения определяется именно им:
+
+```bash
+supabase migration new add_something
+```
+
+| Файл | Что делает |
+| --- | --- |
+| `*_create_contract_chunks.sql` | расширение pgvector, таблица `contract_chunks` |
+| `*_create_match_documents.sql` | RPC-функция `match_documents` для top-k поиска |
+
 ## Эмбеддинги и Supabase
 
 Индексатор использует `ai-forever/ru-en-RoSBERTa` и хранит 1024-мерные векторы
@@ -83,7 +116,7 @@ for chunk in chunks:
 Перед первым запуском:
 
 1. Создайте или выберите проект Supabase.
-2. Выполните `migrations/001_create_contract_chunks.sql` в SQL Editor проекта.
+2. Накатите миграции через Supabase CLI (см. «Миграции» ниже).
 3. Создайте локальный `.env` — этот файл исключён из Git:
 
 ```dotenv
@@ -110,3 +143,56 @@ embed_and_index(chunks, supabase)
 `source_file::preamble`. В многоязычных документах номер пункта может повторяться.
 Чтобы не перезаписать один язык другим, коллизии получают детерминированный суффикс
 страницы и порядкового номера.
+
+## Поиск по векторам
+
+`retrieve()` кодирует запрос с префиксом `search_query: ` и вызывает Postgres-функцию
+`match_documents` через `supabase.rpc()`. Обычный клиент PostgREST не умеет строить
+`order by embedding <=> ...`, поэтому сортировка живёт в SQL, а Python только
+передаёт вектор и `k`.
+
+```python
+from contract_rag.retriever import retrieve
+
+for hit in retrieve("Куда передаются неразрешённые споры?", k=5):
+    print(hit.similarity, hit.chunk.clause_id, hit.chunk.page_number, hit.chunk.source_file)
+```
+
+Возвращается `RetrievedChunk`: целый `Chunk` со всеми метаданными плюс `chunk_id`
+из базы и `similarity`. Текст чанка не обрезается и не переформулируется.
+Список отсортирован по убыванию `similarity`, длина — не больше `k`.
+`k <= 0` — это `ValueError`; пустая таблица — пустой список, а не исключение.
+
+Клиент можно внедрить явно — так же, как в индексаторе, и так же тестировать
+фейком без сети:
+
+```python
+from contract_rag.retriever import SupabaseRetriever
+
+hits = SupabaseRetriever(supabase_client).retrieve("payment schedule", k=3)
+```
+
+### Решения
+
+- **Косинус (`<=>`).** Модель отдаёт нормализованные векторы — для них pgvector
+  рекомендует именно косинусное расстояние. `similarity = 1 - distance`.
+- **ANN-индекса нет.** На десятках чанков sequential scan даёт точный результат
+  (recall 100%) и не требует обслуживания. HNSW окупается ближе к ~1 млн строк.
+- **Reranking не входит в retrieval.** Он добавляется поверх, отдельным решением.
+
+### Качество на mini eval-сете
+
+Разметка и скрипт замера — в `eval/`. Метрика: доля вопросов, у которых ожидаемый
+пункт попал в top-k. Замер на 12 размеченных вопросах (5 ru/kk, 7 en) по корпусу
+из 210 проиндексированных чанков:
+
+| Метрика | Результат |
+| --- | --- |
+| recall@1 | 8/12 = 0.67 |
+| recall@3 | 11/12 = 0.92 |
+| recall@5 | 12/12 = 1.00 |
+
+Сет маленький и составлен по содержимому уже проиндексированного корпуса, поэтому
+`recall@5 = 1.00` означает «на текущем масштабе retrieval не теряет ни одного
+языка», а не «поиск решён». Число нужно как база для сравнения: любое будущее
+изменение (reranking, другая модель, другой chunking) сверяется с ним.

@@ -5,9 +5,11 @@ from contract_rag.embeddings.embeddings import (
     EMBEDDING_DIMENSION,
     MODEL_NAME,
     MODEL_TOKEN_LIMIT,
+    QUERY_PREFIX,
     RoSBERTaEmbedder,
     create_supabase_client_from_env,
     embed_and_index,
+    get_default_embedder,
 )
 
 __all__ = [
@@ -15,7 +17,9 @@ __all__ = [
     "EMBEDDING_DIMENSION",
     "MODEL_NAME",
     "MODEL_TOKEN_LIMIT",
+    "QUERY_PREFIX",
     "RoSBERTaEmbedder",
     "create_supabase_client_from_env",
     "embed_and_index",
+    "get_default_embedder",
 ]

@@ -17,6 +17,7 @@ from contract_rag.embeddings import (
 from contract_rag.loader import load_pdf
 
 CORPUS_DIR = Path(__file__).parents[1] / "corpus_raw" / "contracts"
+MIGRATIONS_DIR = Path(__file__).parents[1] / "supabase" / "migrations"
 
 
 class FakeModel:
@@ -203,7 +204,7 @@ def test_empty_input_does_not_load_model_or_call_supabase(
 ) -> None:
     monkeypatch.setattr(
         embeddings_module,
-        "_get_default_embedder",
+        "get_default_embedder",
         lambda: pytest.fail("model must not load for empty input"),
     )
 
@@ -224,7 +225,7 @@ def test_missing_supabase_environment_is_explicit(
 
 
 def test_migration_defines_required_pgvector_schema() -> None:
-    migration_path = Path(__file__).parents[1] / "migrations" / "001_create_contract_chunks.sql"
+    (migration_path,) = MIGRATIONS_DIR.glob("*_create_contract_chunks.sql")
     migration = migration_path.read_text().lower()
 
     assert "create extension if not exists vector" in migration

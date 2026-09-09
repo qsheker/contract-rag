@@ -15,6 +15,7 @@ from contract_rag.chunker import Chunk
 
 MODEL_NAME = "ai-forever/ru-en-RoSBERTa"
 DOCUMENT_PREFIX = "search_document: "
+QUERY_PREFIX = "search_query: "
 MODEL_TOKEN_LIMIT = 512
 EMBEDDING_DIMENSION = 1024
 TABLE_NAME = "contract_chunks"
@@ -74,6 +75,20 @@ class RoSBERTaEmbedder:
                 )
             prefixed_texts.append(prefixed_text)
 
+        return self._encode(prefixed_texts)
+
+    def embed_query(self, query: str) -> list[float]:
+        """Embed one search query with the prefix asymmetric retrieval requires."""
+
+        prefixed_query = f"{QUERY_PREFIX}{query}"
+        if self._token_count(prefixed_query) > self._model.max_seq_length:
+            logger.warning(
+                "Query input truncated to %d tokens",
+                self._model.max_seq_length,
+            )
+        return self._encode([prefixed_query])[0]
+
+    def _encode(self, prefixed_texts: list[str]) -> list[list[float]]:
         if not prefixed_texts:
             return []
 
@@ -108,7 +123,9 @@ class RoSBERTaEmbedder:
 _default_embedder: RoSBERTaEmbedder | None = None
 
 
-def _get_default_embedder() -> RoSBERTaEmbedder:
+def get_default_embedder() -> RoSBERTaEmbedder:
+    """Return the process-wide embedder, loading the model on first use."""
+
     global _default_embedder
     if _default_embedder is None:
         _default_embedder = RoSBERTaEmbedder()
@@ -137,7 +154,7 @@ def embed_and_index(chunks: list[Chunk], supabase_client: Any) -> None:
     if not indexed_chunks:
         return
 
-    embeddings = _get_default_embedder().embed_documents(
+    embeddings = get_default_embedder().embed_documents(
         [indexed_chunk.chunk for indexed_chunk in indexed_chunks]
     )
     rows = [
