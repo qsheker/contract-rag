@@ -19,14 +19,15 @@ uv run ruff check .
 
 Первый корпус публичных шаблонов договоров хранится в `corpus_raw/contracts/`.
 
-Loader извлекает и очищает текст каждого PDF постранично, сохраняя номер страницы
-и исходный путь:
+Loader принимает PDF, DOCX и TXT. `load_document()` выбирает загрузчик по
+расширению файла; кто знает формат заранее, может звать `load_pdf()`,
+`load_docx()` или `load_txt()` напрямую.
 
 ```python
-from contract_rag.loader import LoaderError, NoTextLayerError, load_pdf
+from contract_rag.loader import LoaderError, NoTextLayerError, load_document
 
 try:
-    pages = load_pdf("corpus_raw/contracts/contract_01.pdf")
+    pages = load_document("corpus_raw/contracts/contract_01.pdf")
 except NoTextLayerError:
     # OCR намеренно не входит в текущий Loader.
     raise
@@ -37,7 +38,27 @@ for page in pages:
     print(page.page_number, page.source_file, page.text[:80])
 ```
 
-`load_pdf()` удаляет повторяющиеся граничные строки и исправляет переносы слов.
+| Формат | Страницы | `page_number` |
+| --- | --- | --- |
+| `.pdf` | реальные границы страниц из файла | `1, 2, 3, …` |
+| `.docx` | весь документ — одна «страница» | `None` |
+| `.txt` | весь файл — одна «страница» | `None` |
+
+**У DOCX и TXT номера страницы не существует.** У DOCX разбивка появляется только
+при рендеринге — она зависит от шрифтов и полей устройства и в файле не хранится;
+у TXT понятия страницы нет вовсе. Поэтому `page_number` там `None`, а не выдуманное
+число: **цитата по такому документу может содержать пункт, но не страницу.**
+Интерфейсу стоит предупреждать об этом при загрузке не-PDF файла.
+
+Расширение с неизвестным суффиксом — это `UnsupportedFormatError`; список
+поддерживаемых лежит в `SUPPORTED_EXTENSIONS`.
+
+Все форматы проходят одну и ту же очистку переносов (`join_hyphenation`), поэтому
+чанкеру не нужно знать, откуда пришёл текст. Удаление повторяющихся колонтитулов
+(`strip_boilerplate`) применяется только к PDF — ему нужно минимум две страницы.
+Из DOCX читаются и параграфы, и таблицы в порядке документа: реквизиты сторон и
+графики платежей обычно живут именно в таблицах.
+
 Chunking, определение пунктов, OCR и HTTP API остаются за пределами Loader.
 
 ## Разбиение по пунктам
@@ -106,6 +127,7 @@ supabase migration new add_something
 | --- | --- |
 | `*_create_contract_chunks.sql` | расширение pgvector, таблица `contract_chunks` |
 | `*_create_match_documents.sql` | RPC-функция `match_documents` для top-k поиска |
+| `*_allow_null_page_number.sql` | `page_number` становится nullable — для DOCX/TXT |
 
 ## Эмбеддинги и Supabase
 

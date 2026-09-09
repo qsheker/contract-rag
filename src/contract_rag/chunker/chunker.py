@@ -12,15 +12,21 @@ from contract_rag.loader import PageText
 
 @dataclass(frozen=True, slots=True)
 class Chunk:
-    """A retrievable document fragment anchored to its starting page."""
+    """A retrievable document fragment anchored to its starting page.
+
+    ``page_number`` is ``None`` when the source format has no pages (DOCX, TXT);
+    such a chunk can still be cited by clause, but not by page.
+    """
 
     text: str
     clause_id: str | None
-    page_number: int
+    page_number: int | None
     source_file: str
     detected_strategy: str
 
     def __post_init__(self) -> None:
+        if self.page_number is None:
+            return
         if isinstance(self.page_number, bool) or not isinstance(self.page_number, int):
             raise ValueError("page_number must be an integer greater than or equal to 1")
         if self.page_number < 1:
@@ -41,14 +47,14 @@ class UnsupportedNumberingError(Exception):
 @dataclass(frozen=True, slots=True)
 class _LineRecord:
     text: str
-    page_number: int
+    page_number: int | None
 
 
 @dataclass(frozen=True, slots=True)
 class _Boundary:
     line_index: int
     clause_id: str
-    page_number: int
+    page_number: int | None
 
 
 class ChunkStrategy(ABC):
@@ -208,7 +214,12 @@ def _validate_pages(pages: list[PageText]) -> str | None:
         raise ValueError("all pages must belong to the same source_file")
 
     page_numbers = [page.page_number for page in pages]
-    if any(
+    # Pageless formats (DOCX, TXT) produce exactly one page, so there is no
+    # ordering to check - and comparing None against None would raise.
+    if any(page_number is None for page_number in page_numbers):
+        if len(page_numbers) > 1:
+            raise ValueError("pages without a page_number must be a single page")
+    elif any(
         current >= following
         for current, following in zip(page_numbers, page_numbers[1:], strict=False)
     ):
@@ -273,7 +284,7 @@ def _join_records(records: list[_LineRecord]) -> str:
     return "\n".join(record.text for record in records).strip()
 
 
-def _first_content_page(records: list[_LineRecord]) -> int:
+def _first_content_page(records: list[_LineRecord]) -> int | None:
     for record in records:
         if record.text.strip():
             return record.page_number

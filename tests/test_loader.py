@@ -1,21 +1,28 @@
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
+import docx
 import pymupdf
 import pytest
 
 from contract_rag.loader import (
+    SUPPORTED_EXTENSIONS,
     LoaderError,
     LoaderErrorCode,
     NoTextLayerError,
     PageText,
+    UnsupportedFormatError,
     join_hyphenation,
+    load_document,
+    load_docx,
     load_pdf,
+    load_txt,
     strip_boilerplate,
 )
 
 CORPUS_DIR = Path(__file__).parents[1] / "corpus_raw" / "contracts"
 CORPUS_FILES = sorted(CORPUS_DIR.glob("contract_*.pdf"))
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 def _create_pdf(path: Path, page_texts: list[str]) -> None:
@@ -25,6 +32,22 @@ def _create_pdf(path: Path, page_texts: list[str]) -> None:
             if text:
                 page.insert_text((72, 72), text)
         document.save(path)
+
+
+def _create_docx(
+    path: Path,
+    paragraphs: list[str],
+    table_rows: list[tuple[str, str]] | None = None,
+) -> None:
+    document = docx.Document()
+    for paragraph in paragraphs:
+        document.add_paragraph(paragraph)
+    if table_rows:
+        table = document.add_table(rows=len(table_rows), cols=2)
+        for row_index, (left, right) in enumerate(table_rows):
+            table.rows[row_index].cells[0].text = left
+            table.rows[row_index].cells[1].text = right
+    document.save(path)
 
 
 def test_page_text_is_immutable_and_requires_positive_page_number() -> None:
@@ -185,3 +208,172 @@ def test_load_pdf_handles_every_contract_in_corpus(pdf_path: Path) -> None:
     assert [page.page_number for page in pages] == list(range(1, expected_page_count + 1))
     assert all(page.source_file == str(pdf_path) for page in pages)
     assert any(page.text for page in pages)
+
+
+def test_page_text_accepts_a_missing_page_number() -> None:
+    page = PageText(page_number=None, text="body", source_file="sample.docx")
+
+    assert page.page_number is None
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        PageText(page_number=0, text="body", source_file="sample.docx")
+
+
+def test_load_document_reads_docx_as_one_pageless_page(tmp_path: Path) -> None:
+    docx_path = tmp_path / "agreement.docx"
+    _create_docx(docx_path, ["1.1 First clause.", "1.2 Second clause."])
+
+    pages = load_document(docx_path)
+
+    assert len(pages) == 1
+    assert pages[0].page_number is None
+    assert pages[0].text == "1.1 First clause.\n1.2 Second clause."
+    assert pages[0].source_file == str(docx_path)
+
+
+def test_load_document_reads_txt_as_one_pageless_page(tmp_path: Path) -> None:
+    txt_path = tmp_path / "agreement.txt"
+    txt_path.write_text("1.1 First clause.\n1.2 Second clause.\n", encoding="utf-8")
+
+    pages = load_document(txt_path)
+
+    assert len(pages) == 1
+    assert pages[0].page_number is None
+    assert pages[0].text == "1.1 First clause.\n1.2 Second clause."
+    assert pages[0].source_file == str(txt_path)
+
+
+def test_load_document_is_identical_to_load_pdf_for_pdf(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "three-pages.pdf"
+    _create_pdf(pdf_path, ["Alpha", "Beta", "Gamma"])
+
+    assert load_document(pdf_path) == load_pdf(pdf_path)
+
+
+@pytest.mark.parametrize("filename", ["notes.rtf", "archive.pdf.zip", "no-extension"])
+def test_load_document_rejects_unsupported_formats(tmp_path: Path, filename: str) -> None:
+    unsupported_path = tmp_path / filename
+    unsupported_path.write_text("content", encoding="utf-8")
+
+    with pytest.raises(UnsupportedFormatError) as exception_info:
+        load_document(unsupported_path)
+
+    assert exception_info.value.code is LoaderErrorCode.UNSUPPORTED_FORMAT
+    assert exception_info.value.source_file == str(unsupported_path)
+    assert SUPPORTED_EXTENSIONS == {".pdf", ".docx", ".txt"}
+
+
+def test_load_document_matches_extensions_case_insensitively(tmp_path: Path) -> None:
+    txt_path = tmp_path / "AGREEMENT.TXT"
+    txt_path.write_text("1.1 Clause.", encoding="utf-8")
+
+    assert load_document(txt_path)[0].text == "1.1 Clause."
+
+
+def test_load_docx_keeps_table_text_in_document_order(tmp_path: Path) -> None:
+    docx_path = tmp_path / "with-table.docx"
+    _create_docx(
+        docx_path,
+        ["3. РЕКВИЗИТЫ СТОРОН"],
+        table_rows=[("Исполнитель", "Заказчик"), ("БИН 123", "БИН 456")],
+    )
+
+    text = load_docx(docx_path)[0].text
+
+    assert text.splitlines() == [
+        "3. РЕКВИЗИТЫ СТОРОН",
+        "Исполнитель\tЗаказчик",
+        "БИН 123\tБИН 456",
+    ]
+
+
+def test_load_docx_joins_hyphenation_like_the_pdf_path(tmp_path: Path) -> None:
+    docx_path = tmp_path / "hyphenated.docx"
+    _create_docx(docx_path, ["1.1 в согласованном ассорти-", "менте товара."])
+
+    assert load_docx(docx_path)[0].text == "1.1 в согласованном ассортименте товара."
+
+
+def test_load_docx_reports_expected_file_errors(tmp_path: Path) -> None:
+    with pytest.raises(LoaderError) as missing_error:
+        load_docx(tmp_path / "missing.docx")
+    assert missing_error.value.code is LoaderErrorCode.FILE_NOT_FOUND
+
+    with pytest.raises(LoaderError) as directory_error:
+        load_docx(tmp_path)
+    assert directory_error.value.code is LoaderErrorCode.PATH_IS_DIRECTORY
+
+    invalid_path = tmp_path / "invalid.docx"
+    invalid_path.write_text("not a DOCX", encoding="utf-8")
+    with pytest.raises(LoaderError) as invalid_error:
+        load_docx(invalid_path)
+    assert invalid_error.value.code is LoaderErrorCode.INVALID_DOCX
+
+
+def test_load_txt_reports_expected_file_errors(tmp_path: Path) -> None:
+    with pytest.raises(LoaderError) as missing_error:
+        load_txt(tmp_path / "missing.txt")
+    assert missing_error.value.code is LoaderErrorCode.FILE_NOT_FOUND
+
+    with pytest.raises(LoaderError) as directory_error:
+        load_txt(tmp_path)
+    assert directory_error.value.code is LoaderErrorCode.PATH_IS_DIRECTORY
+
+
+def test_load_txt_rejects_non_utf8_bytes(tmp_path: Path) -> None:
+    txt_path = tmp_path / "cp1251.txt"
+    txt_path.write_bytes("Договор поставки".encode("cp1251"))
+
+    with pytest.raises(LoaderError) as exception_info:
+        load_txt(txt_path)
+
+    assert exception_info.value.code is LoaderErrorCode.INVALID_ENCODING
+
+
+def test_load_txt_strips_the_utf8_byte_order_mark(tmp_path: Path) -> None:
+    txt_path = tmp_path / "bom.txt"
+    txt_path.write_text("1.1 Clause.", encoding="utf-8-sig")
+
+    assert load_txt(txt_path)[0].text == "1.1 Clause."
+
+
+def test_empty_docx_and_txt_raise_no_text_layer(tmp_path: Path) -> None:
+    empty_docx = tmp_path / "empty.docx"
+    _create_docx(empty_docx, ["", "   "])
+    with pytest.raises(NoTextLayerError) as docx_error:
+        load_docx(empty_docx)
+    assert docx_error.value.code is LoaderErrorCode.NO_TEXT_LAYER
+
+    empty_txt = tmp_path / "empty.txt"
+    empty_txt.write_text("\n  \n", encoding="utf-8")
+    with pytest.raises(NoTextLayerError) as txt_error:
+        load_txt(empty_txt)
+    assert txt_error.value.code is LoaderErrorCode.NO_TEXT_LAYER
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["sample_contract.docx", "sample_contract.txt"],
+)
+def test_committed_fixtures_load_as_one_pageless_page(fixture_name: str) -> None:
+    fixture_path = FIXTURES_DIR / fixture_name
+
+    pages = load_document(fixture_path)
+
+    assert len(pages) == 1
+    assert pages[0].page_number is None
+    assert pages[0].source_file == str(fixture_path)
+    assert "2.2 Оплата производится" in pages[0].text
+
+
+def test_committed_docx_fixture_keeps_bank_details_from_its_table() -> None:
+    text = load_document(FIXTURES_DIR / "sample_contract.docx")[0].text
+
+    assert "IBAN KZ11 1111 1111 1111" in text
+    assert "БИН 210987654321" in text
+
+
+def test_committed_txt_fixture_joins_hyphenated_words() -> None:
+    text = load_document(FIXTURES_DIR / "sample_contract.txt")[0].text
+
+    assert "ассортименте" in text
+    assert "ассорти-" not in text

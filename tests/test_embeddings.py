@@ -87,7 +87,7 @@ def make_chunk(
     clause_id: str | None,
     *,
     text: str = "Clause text",
-    page_number: int = 1,
+    page_number: int | None = 1,
     source_file: str = "contract.pdf",
 ) -> Chunk:
     return Chunk(
@@ -262,3 +262,33 @@ def test_every_supported_corpus_chunk_can_be_indexed_without_data_loss(
             "contract_05.pdf",
         )
     }
+
+
+def test_chunk_without_a_page_number_is_stored_as_null(fake_client: FakeSupabaseClient) -> None:
+    chunk = make_chunk("1.1", page_number=None, source_file="agreement.docx")
+
+    embed_and_index([chunk], fake_client)
+
+    assert fake_client.rows["agreement.docx::1.1"]["page_number"] is None
+
+
+def test_colliding_clauses_without_page_numbers_stay_distinct(
+    fake_client: FakeSupabaseClient,
+) -> None:
+    first = make_chunk("1.1", text="Русский текст", page_number=None, source_file="a.docx")
+    second = make_chunk("1.1", text="Қазақша мәтін", page_number=None, source_file="a.docx")
+
+    embed_and_index([first, second], fake_client)
+
+    assert set(fake_client.rows) == {
+        "a.docx::1.1",
+        "a.docx::1.1::page-None::occurrence-2",
+    }
+
+
+def test_migration_allows_chunks_without_a_page_number() -> None:
+    (migration_path,) = MIGRATIONS_DIR.glob("*_allow_null_page_number.sql")
+    migration = migration_path.read_text().lower()
+
+    assert "alter table public.contract_chunks" in migration
+    assert "alter column page_number drop not null" in migration
