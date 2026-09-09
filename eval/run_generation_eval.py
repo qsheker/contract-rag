@@ -54,12 +54,19 @@ def main() -> None:
     cases = load_cases()
     print(f"model: {model}\n")
 
-    outcomes = [evaluate_case(case) for case in cases]
-    print(f"{'case':<5} {'cites':<6} {'expected':<9} status")
-    for outcome in outcomes:
+    # Printed as each case lands: a local 7B model takes minutes over the set,
+    # and a silent run is indistinguishable from a hung one.
+    print(f"{'case':<5} {'cites':<6} {'expected':<9} status", flush=True)
+    outcomes: list[CaseOutcome] = []
+    for case in cases:
+        outcome = evaluate_case(case)
+        outcomes.append(outcome)
         status = outcome.error or ("declined" if outcome.declined else "answered")
         expected = "yes" if outcome.cited_expected_clause else "no"
-        print(f"{outcome.case_id:<5} {outcome.citation_count:<6} {expected:<9} {status}")
+        print(
+            f"{outcome.case_id:<5} {outcome.citation_count:<6} {expected:<9} {status}",
+            flush=True,
+        )
 
     total = len(outcomes)
     answered = sum(1 for outcome in outcomes if not outcome.declined and outcome.error is None)
