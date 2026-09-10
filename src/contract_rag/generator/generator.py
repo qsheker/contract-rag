@@ -48,6 +48,19 @@ class GenerationError(Exception):
     """Raised when the provider fails or returns something unusable."""
 
 
+class UnsupportedCitationError(GenerationError):
+    """Raised when the answer cites something that was never in the context.
+
+    A distinct type rather than a message to grep: a caller showing this to a
+    person needs to say "the answer was withheld because its references could
+    not be verified", which is a different sentence from "the provider broke".
+    """
+
+    def __init__(self, citations: Sequence[Citation], described: str) -> None:
+        super().__init__(f"Answer cited excerpts that were not supplied: {described}")
+        self.citations = list(citations)
+
+
 def get_generation_model_from_env() -> str:
     """Return the configured model id, or fail loudly at start-up.
 
@@ -180,4 +193,4 @@ def _reject_unsupported_citations(answer: Answer, chunks: Sequence[Chunk]) -> No
             f"{citation.source_file}::{citation.clause_id}::page-{citation.page_number}"
             for citation in unsupported
         )
-        raise GenerationError(f"Answer cited excerpts that were not supplied: {described}")
+        raise UnsupportedCitationError(unsupported, described)

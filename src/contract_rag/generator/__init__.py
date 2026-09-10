@@ -8,6 +8,7 @@ from contract_rag.generator.generator import (
     AnswerGenerator,
     Citation,
     GenerationError,
+    UnsupportedCitationError,
     generate_answer,
     get_generation_model_from_env,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "AnswerGenerator",
     "Citation",
     "GenerationError",
+    "UnsupportedCitationError",
     "generate_answer",
     "get_generation_model_from_env",
 ]

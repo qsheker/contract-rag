@@ -16,7 +16,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from api.reformulate import reformulate_query
 from contract_rag.chunker import UnsupportedNumberingError
 from contract_rag.embeddings import get_default_embedder
-from contract_rag.generator import Citation, GenerationError, generate_answer
+from contract_rag.generator import (
+    Citation,
+    GenerationError,
+    UnsupportedCitationError,
+    generate_answer,
+)
 from contract_rag.ingestion import ingest_document, normalize_filename, pageless_warnings
 from contract_rag.loader import LoaderError, LoaderErrorCode, UnsupportedFormatError
 from contract_rag.retriever import DEFAULT_MATCH_COUNT, retrieve
@@ -158,9 +163,26 @@ def chat(request: ChatRequest) -> ChatResponse:
     hits = retrieve(standalone_query, k=DEFAULT_MATCH_COUNT)
     try:
         answer = generate_answer(standalone_query, [hit.chunk for hit in hits])
+    except UnsupportedCitationError as error:
+        # The rejection is correct and the detail - a list of row ids - belongs
+        # in the log, not on screen. What the reader needs is why they have no
+        # answer and what to do about it.
+        logger.warning("Answer withheld: %s", error)
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "Модель сослалась на пункты, которых нет в найденных фрагментах, "
+                "поэтому ответ отклонён — цитата, которую нельзя проверить, хуже "
+                "отсутствия ответа. Попробуйте задать вопрос конкретнее."
+            ),
+        ) from error
     except GenerationError as error:
+        logger.warning("Generation failed: %s", error)
         # 502: the request was fine, the model behind it was not.
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail="Модель генерации не ответила или вернула непригодный результат.",
+        ) from error
 
     return ChatResponse(
         answer=answer.text,

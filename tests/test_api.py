@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -8,7 +9,12 @@ import api.main as main_module
 from api.main import ALLOWED_ORIGINS, MAX_UPLOAD_BYTES, app
 from api.reformulate import StandaloneQuery, reformulate_query
 from contract_rag.chunker import Chunk, UnsupportedNumberingError
-from contract_rag.generator import Answer, Citation, GenerationError
+from contract_rag.generator import (
+    Answer,
+    Citation,
+    GenerationError,
+    UnsupportedCitationError,
+)
 from contract_rag.loader import (
     LoaderError,
     LoaderErrorCode,
@@ -209,14 +215,40 @@ def test_a_generation_failure_is_reported_as_a_provider_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fail(query: str, chunks: Sequence[Chunk], **kwargs: Any) -> Answer:
-        raise GenerationError("Answer cited excerpts that were not supplied: contract.pdf::9.9")
+        raise GenerationError("Generation failed for model ollama/qwen2.5:7b: connection refused")
 
     monkeypatch.setattr(main_module, "generate_answer", fail)
 
     response = client.post("/chat", json={"message": "Какой срок оплаты?"})
 
     assert response.status_code == 502
-    assert "not supplied" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert "Модель генерации" in detail
+    assert "connection refused" not in detail
+
+
+def test_a_rejected_citation_explains_itself_without_leaking_row_ids(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    invented = [Citation(clause_id="5.2.1", page_number=None, source_file="договор.docx")]
+
+    def reject(query: str, chunks: Sequence[Chunk], **kwargs: Any) -> Answer:
+        raise UnsupportedCitationError(invented, "договор.docx::5.2.1::page-None")
+
+    monkeypatch.setattr(main_module, "generate_answer", reject)
+
+    with caplog.at_level(logging.WARNING):
+        response = client.post("/chat", json={"message": "Что я должен делать на работе?"})
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "нельзя проверить" in detail
+    # The row ids are diagnostics for the developer, not text for the reader.
+    assert "page-None" not in detail
+    assert "5.2.1" not in detail
+    assert "договор.docx::5.2.1::page-None" in caplog.text
 
 
 def test_a_pdf_upload_reports_its_chunk_count_without_warnings(
