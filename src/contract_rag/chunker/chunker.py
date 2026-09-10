@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar
 
 from contract_rag.loader import PageText
@@ -16,6 +16,15 @@ class Chunk:
 
     ``page_number`` is ``None`` when the source format has no pages (DOCX, TXT);
     such a chunk can still be cited by clause, but not by page.
+
+    ``context`` holds the heading lines this chunk hangs under - its section
+    title and the clause that introduces it. It exists because a sub-item read
+    on its own is a fragment: "3.1.1. a five-day working week" means little
+    without "3.1. The employee is assigned normal working hours:". It is fed to
+    the embedding so retrieval can see that framing, and it is deliberately kept
+    out of ``text``, which stays exactly what the document says and is what a
+    citation shows. It is ``None`` for a chunk with no ancestors, and also for a
+    chunk read back out of the index, where only ``text`` was stored.
     """
 
     text: str
@@ -23,6 +32,7 @@ class Chunk:
     page_number: int | None
     source_file: str
     detected_strategy: str
+    context: str | None = None
 
     def __post_init__(self) -> None:
         if self.page_number is None:
@@ -80,11 +90,13 @@ class ChunkStrategy(ABC):
         if len(boundaries) < self.minimum_matches:
             return None
 
-        return _build_chunks(
-            line_records=line_records,
-            boundaries=boundaries,
-            source_file=source_file,
-            strategy_name=self.name,
+        return _with_ancestor_context(
+            _build_chunks(
+                line_records=line_records,
+                boundaries=boundaries,
+                source_file=source_file,
+                strategy_name=self.name,
+            )
         )
 
     @abstractmethod
@@ -332,6 +344,38 @@ def _build_chunks(
         )
 
     return chunks
+
+
+def _with_ancestor_context(chunks: list[Chunk]) -> list[Chunk]:
+    """Attach each chunk's ancestor headings, taken from the chunks before it.
+
+    Only the opening line of an ancestor is carried: that is its heading, and
+    dragging in the ancestor's whole body would put the same paragraphs into
+    every descendant's embedding.
+    """
+
+    opening_lines: dict[str, str] = {}
+    contextualized: list[Chunk] = []
+    for chunk in chunks:
+        ancestor_headings = [
+            opening_lines[ancestor_id]
+            for ancestor_id in _ancestor_ids(chunk.clause_id)
+            if ancestor_id in opening_lines
+        ]
+        contextualized.append(replace(chunk, context="\n".join(ancestor_headings) or None))
+        if chunk.clause_id:
+            opening_lines[chunk.clause_id] = chunk.text.splitlines()[0]
+
+    return contextualized
+
+
+def _ancestor_ids(clause_id: str | None) -> list[str]:
+    """Return the enclosing identifiers of ``4.9.3``, outermost first: 4, 4.9."""
+
+    if not clause_id:
+        return []
+    parts = clause_id.split(".")
+    return [".".join(parts[:depth]) for depth in range(1, len(parts))]
 
 
 def _join_records(records: list[_LineRecord]) -> str:

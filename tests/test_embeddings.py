@@ -7,6 +7,7 @@ import pytest
 import contract_rag.embeddings.embeddings as embeddings_module
 from contract_rag.chunker import Chunk, UnsupportedNumberingError, chunk_by_clause
 from contract_rag.embeddings import (
+    CONTEXT_MAX_CHARS,
     DOCUMENT_PREFIX,
     EMBEDDING_DIMENSION,
     MODEL_TOKEN_LIMIT,
@@ -114,6 +115,60 @@ def test_embed_and_index_writes_one_row_per_unique_chunk(
     }
     assert fake_client.upsert_calls[0][0] == "contract_chunks"
     assert fake_client.upsert_calls[0][2] == "id"
+
+
+def test_the_encoded_text_carries_the_context_but_the_stored_text_does_not(
+    fake_client: FakeSupabaseClient,
+    fake_model: FakeModel,
+) -> None:
+    chunk = Chunk(
+        text="3.1.1. пятидневная рабочая неделя;",
+        clause_id="3.1.1",
+        page_number=None,
+        source_file="contract.docx",
+        detected_strategy="dotted_numbering",
+        context="3. РЕЖИМ РАБОЧЕГО ВРЕМЕНИ\n3.1. Работнику устанавливается рабочее время:",
+    )
+
+    embed_and_index([chunk], fake_client)
+
+    encoded = fake_model.encoded_texts[0]
+    assert encoded == f"{DOCUMENT_PREFIX}{chunk.context}\n{chunk.text}"
+    # A citation quotes the contract, so the stored text stays verbatim.
+    assert fake_client.rows["contract.docx::3.1.1"]["text"] == chunk.text
+
+
+def test_a_long_chunk_is_encoded_without_its_context(
+    fake_client: FakeSupabaseClient,
+    fake_model: FakeModel,
+) -> None:
+    # A chunk this size carries its own framing. Prepending headings anyway
+    # broadens it topically and pushes other documents' answers out of top-k.
+    long_text = "5.5. " + "Условие договора. " * 40
+    assert len(long_text) >= CONTEXT_MAX_CHARS
+    chunk = Chunk(
+        text=long_text,
+        clause_id="5.5",
+        page_number=None,
+        source_file="contract.docx",
+        detected_strategy="dotted_numbering",
+        context="5. ОТВЕТСТВЕННОСТЬ СТОРОН",
+    )
+
+    embed_and_index([chunk], fake_client)
+
+    assert fake_model.encoded_texts == [f"{DOCUMENT_PREFIX}{long_text}"]
+
+
+def test_a_chunk_without_context_is_encoded_as_before(
+    fake_client: FakeSupabaseClient,
+    fake_model: FakeModel,
+) -> None:
+    chunk = make_chunk("1.1", text="1.1 Clause text")
+
+    embed_and_index([chunk], fake_client)
+
+    assert fake_model.encoded_texts == [f"{DOCUMENT_PREFIX}1.1 Clause text"]
 
 
 def test_preamble_clause_id_is_native_none(fake_client: FakeSupabaseClient) -> None:

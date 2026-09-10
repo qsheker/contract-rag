@@ -180,6 +180,53 @@ def test_realistic_numbering_is_split_without_losing_text() -> None:
     assert significant("".join(chunk.text for chunk in chunks)) == significant(pages[0].text)
 
 
+def test_a_sub_item_carries_the_headings_it_hangs_under() -> None:
+    pages = [
+        PageText(
+            1,
+            (
+                "3. РЕЖИМ РАБОЧЕГО ВРЕМЕНИ\n"
+                "3.1. Работнику устанавливается рабочее время:\n"
+                "3.1.1. пятидневная рабочая неделя;\n"
+                "3.2. Выходными днями являются суббота и воскресенье."
+            ),
+            "sample.docx",
+        )
+    ]
+
+    chunks = {chunk.clause_id: chunk for chunk in chunk_by_clause(pages)}
+
+    assert chunks["3.1.1"].context == (
+        "3. РЕЖИМ РАБОЧЕГО ВРЕМЕНИ\n3.1. Работнику устанавливается рабочее время:"
+    )
+    assert chunks["3.2"].context == "3. РЕЖИМ РАБОЧЕГО ВРЕМЕНИ"
+    assert chunks["3"].context is None
+    # The framing is for the embedding only: a citation must quote the document.
+    assert chunks["3.1.1"].text == "3.1.1. пятидневная рабочая неделя;"
+
+
+def test_only_the_opening_line_of_an_ancestor_is_carried() -> None:
+    pages = [
+        PageText(
+            1,
+            (
+                "4.1. Оплата производится в следующем порядке:\n"
+                "Первый абзац тела пункта 4.1.\n"
+                "Второй абзац тела пункта 4.1.\n"
+                "4.1.1. аванс в размере 30 процентов;\n"
+                "4.2. Иные условия оплаты не применяются."
+            ),
+            "sample.docx",
+        )
+    ]
+
+    chunks = {chunk.clause_id: chunk for chunk in chunk_by_clause(pages)}
+
+    # Dragging in 4.1's whole body would repeat those paragraphs in every
+    # descendant's embedding.
+    assert chunks["4.1.1"].context == "4.1. Оплата производится в следующем порядке:"
+
+
 def test_dotted_numbering_has_priority_over_other_strategies() -> None:
     pages = [
         PageText(

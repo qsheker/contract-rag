@@ -1,6 +1,7 @@
 """Public API for chunk embedding and Supabase indexing."""
 
 from contract_rag.embeddings.embeddings import (
+    CONTEXT_MAX_CHARS,
     DOCUMENT_PREFIX,
     EMBEDDING_DIMENSION,
     FILTER_BUDGET_BYTES,
@@ -15,6 +16,7 @@ from contract_rag.embeddings.embeddings import (
 )
 
 __all__ = [
+    "CONTEXT_MAX_CHARS",
     "DOCUMENT_PREFIX",
     "EMBEDDING_DIMENSION",
     "FILTER_BUDGET_BYTES",

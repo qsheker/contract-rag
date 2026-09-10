@@ -21,6 +21,13 @@ MODEL_TOKEN_LIMIT = 512
 EMBEDDING_DIMENSION = 1024
 TABLE_NAME = "contract_chunks"
 UPSERT_BATCH_SIZE = 50
+# A chunk shorter than this is a fragment and gets its headings prepended
+# before encoding; a longer one already carries its own framing. Measured,
+# not guessed: prepending headings to every chunk broadened the long ones
+# topically enough to push correct answers out of top-5 and cost the eval set
+# one question (12/14 -> 11/14). The regression appears above ~600 characters,
+# and 400 still frames 93% of the real sub-item fragments.
+CONTEXT_MAX_CHARS = 400
 # Room for one delete filter in the query string, well under the request-line
 # limit a gateway will accept. Only stale ids ever go here, so it is rarely hit.
 FILTER_BUDGET_BYTES = 3000
@@ -65,11 +72,17 @@ class RoSBERTaEmbedder:
         self._model = model
 
     def embed_documents(self, chunks: Sequence[Chunk]) -> list[list[float]]:
-        """Embed clean chunk text with the required retrieval prefix."""
+        """Embed chunk text, framing short chunks with their headings.
+
+        What is encoded is not quite what is stored: a short chunk's ancestor
+        headings are prepended so a sub-item is searchable by what it is about,
+        while the stored ``text`` - and therefore every citation - stays exactly
+        what the document says. See ``Chunk.context`` and ``CONTEXT_MAX_CHARS``.
+        """
 
         prefixed_texts: list[str] = []
         for chunk in chunks:
-            prefixed_text = f"{DOCUMENT_PREFIX}{chunk.text}"
+            prefixed_text = f"{DOCUMENT_PREFIX}{_with_context(chunk)}"
             if self._token_count(prefixed_text) > self._model.max_seq_length:
                 logger.warning(
                     "Embedding input truncated to %d tokens: source_file=%s clause_id=%s",
@@ -271,6 +284,14 @@ def _assign_chunk_ids(chunks: Sequence[Chunk]) -> list[_IndexedChunk]:
             )
 
     return [_IndexedChunk(chunk_id=assigned_ids[chunk], chunk=chunk) for chunk in unique_chunks]
+
+
+def _with_context(chunk: Chunk) -> str:
+    """Return the text to encode, framed by the chunk's headings when it is short."""
+
+    if not chunk.context or len(chunk.text) >= CONTEXT_MAX_CHARS:
+        return chunk.text
+    return f"{chunk.context}\n{chunk.text}"
 
 
 def _base_chunk_id(chunk: Chunk) -> str:
