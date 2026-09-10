@@ -21,6 +21,16 @@ from contract_rag.ingestion import ingest_document, normalize_filename, pageless
 from contract_rag.loader import LoaderError, LoaderErrorCode, UnsupportedFormatError
 from contract_rag.retriever import DEFAULT_MATCH_COUNT, retrieve
 
+# uvicorn configures only its own loggers, leaving the root logger on the
+# WARNING-level fallback handler: without this every logger.info in the project
+# - the lifespan progress, the indexed-chunk counts, the stale-row cleanup -
+# goes nowhere. This is the application entry point, so configuring the root
+# logger here is its job rather than a library's.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s:     %(name)s - %(message)s",
+)
+
 logger = logging.getLogger(__name__)
 
 # The Next.js dev server. Listed explicitly rather than via a wildcard: the API

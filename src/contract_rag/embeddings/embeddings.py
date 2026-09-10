@@ -8,6 +8,7 @@ from collections import defaultdict
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 
@@ -20,6 +21,9 @@ MODEL_TOKEN_LIMIT = 512
 EMBEDDING_DIMENSION = 1024
 TABLE_NAME = "contract_chunks"
 UPSERT_BATCH_SIZE = 50
+# Room for one delete filter in the query string, well under the request-line
+# limit a gateway will accept. Only stale ids ever go here, so it is rarely hit.
+FILTER_BUDGET_BYTES = 3000
 
 logger = logging.getLogger(__name__)
 
@@ -193,14 +197,54 @@ def delete_stale_chunks(
     and a retrieved leftover would be cited as if it were still in the contract.
     Call this only after the upsert has succeeded, so a failure mid-run leaves
     the previous version of the document in place instead of nothing.
+
+    The stale ids are worked out here rather than handed to PostgREST as a
+    "not in (survivors)" filter. Every filter value travels in the query string,
+    and ids are ``source_file::clause_id``: a long non-ASCII file name expands
+    to nine URL-encoded bytes per character, so listing the survivors of a
+    whole document overruns the request line and the gateway answers a bare
+    ``Bad Request``. Naming only what has to go usually means naming nothing:
+    a first upload has no stale rows and issues no delete at all.
     """
 
-    query = supabase_client.table(TABLE_NAME).delete().eq("source_file", source_file)
-    if keep_chunk_ids:
-        # PostgREST needs the survivors listed; there is no "not written by this
-        # run" predicate, and the id set of one document stays small.
-        query = query.not_.in_("id", sorted(keep_chunk_ids))
-    query.execute()
+    kept = set(keep_chunk_ids)
+    response = (
+        supabase_client.table(TABLE_NAME).select("id").eq("source_file", source_file).execute()
+    )
+    stale_ids = [
+        row["id"] for row in (getattr(response, "data", None) or []) if row["id"] not in kept
+    ]
+    if not stale_ids:
+        return
+
+    for batch in _batched_filter_values(stale_ids):
+        supabase_client.table(TABLE_NAME).delete().in_("id", batch).execute()
+
+    logger.info("Removed %d stale chunk(s) of %s", len(stale_ids), source_file)
+
+
+def _batched_filter_values(values: Sequence[str]) -> Iterable[list[str]]:
+    """Group ids into batches whose URL-encoded length stays within the budget.
+
+    Batched by encoded size rather than by count: how many ids fit depends on
+    the file name, and a fixed count that works for ``contract.pdf`` overruns
+    the request line for a long Cyrillic one.
+    """
+
+    batch: list[str] = []
+    batch_length = 0
+    for value in values:
+        # Every id contains "::", so PostgREST quotes it; the quotes are encoded
+        # too. One extra byte covers the separating comma.
+        encoded_length = len(quote(f'"{value}"')) + 1
+        if batch and batch_length + encoded_length > FILTER_BUDGET_BYTES:
+            yield batch
+            batch = []
+            batch_length = 0
+        batch.append(value)
+        batch_length += encoded_length
+    if batch:
+        yield batch
 
 
 def _assign_chunk_ids(chunks: Sequence[Chunk]) -> list[_IndexedChunk]:

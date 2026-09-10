@@ -3,6 +3,7 @@
 from contract_rag.embeddings.embeddings import (
     DOCUMENT_PREFIX,
     EMBEDDING_DIMENSION,
+    FILTER_BUDGET_BYTES,
     MODEL_NAME,
     MODEL_TOKEN_LIMIT,
     QUERY_PREFIX,
@@ -16,6 +17,7 @@ from contract_rag.embeddings.embeddings import (
 __all__ = [
     "DOCUMENT_PREFIX",
     "EMBEDDING_DIMENSION",
+    "FILTER_BUDGET_BYTES",
     "MODEL_NAME",
     "MODEL_TOKEN_LIMIT",
     "QUERY_PREFIX",
