@@ -26,6 +26,8 @@ dev = [
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
+# The eval harness lives outside src/ but is still worth testing.
+pythonpath = ["."]
 
 [tool.ruff]
 target-version = "py312"
