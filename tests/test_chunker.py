@@ -10,9 +10,10 @@ from contract_rag.chunker import (
     VerboseNumberingStrategy,
     chunk_by_clause,
 )
-from contract_rag.loader import PageText, load_pdf
+from contract_rag.loader import PageText, load_document, load_pdf
 
 CORPUS_DIR = Path(__file__).parents[1] / "corpus_raw" / "contracts"
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
 EXPECTED_CORPUS_STRATEGIES = {
     "contract_01.pdf": "dotted_numbering",
     "contract_02.pdf": "verbose_numbering",
@@ -90,6 +91,93 @@ def test_dotted_numbering_rejects_line_wrapped_references() -> None:
     ]
 
     assert DottedNumberingStrategy().detect(pages) is None
+
+
+def test_dotted_numbering_accepts_sub_items_that_continue_in_lower_case() -> None:
+    # Russian sub-items continue the parent clause's sentence, so they open in
+    # lower case. Demanding a capital dropped every one of them.
+    pages = [
+        PageText(
+            1,
+            (
+                "3.1. Удержания производятся в следующих случаях:\n"
+                "3.1.1. для возмещения неотработанного аванса;\n"
+                "3.1.2. в случаях возмещения затрат на обучение;\n"
+                "3.1.3. в иных случаях при наличии согласия."
+            ),
+            "sample.docx",
+        )
+    ]
+
+    chunks = DottedNumberingStrategy().detect(pages)
+
+    assert chunks is not None
+    assert [chunk.clause_id for chunk in chunks] == ["3.1", "3.1.1", "3.1.2", "3.1.3"]
+
+
+def test_a_terminated_number_opens_a_clause_and_a_bare_one_does_not() -> None:
+    # The whole distinction in one place: an enumerator terminates its own
+    # number, prose quoting a clause number does not.
+    strategy = DottedNumberingStrategy()
+
+    assert strategy.match_clause_id("4.9.3. для возмещения аванса;") == "4.9.3"
+    assert strategy.match_clause_id("6.2.6 shall be applied as stated.") is None
+
+
+def test_section_headings_open_a_chunk_of_their_own() -> None:
+    pages = [
+        PageText(
+            1,
+            (
+                "5. ПРАВА И ОБЯЗАННОСТИ РАБОТНИКА\n"
+                "5.1. Работник обязан соблюдать стандарты.\n"
+                "6. ПРАВА И ОБЯЗАННОСТИ РАБОТОДАТЕЛЯ\n"
+                "6.1. Работодатель обязан выплачивать вознаграждение."
+            ),
+            "sample.docx",
+        )
+    ]
+
+    chunks = chunk_by_clause(pages)
+
+    assert [chunk.clause_id for chunk in chunks] == ["5", "5.1", "6", "6.1"]
+    # Without the heading boundary, section 6 would sit inside clause 5.1 and
+    # every fact in it would be cited as 5.1.
+    clause_5_1 = next(chunk for chunk in chunks if chunk.clause_id == "5.1")
+    assert "РАБОТОДАТЕЛЯ" not in clause_5_1.text
+
+
+def test_a_numbered_line_of_prose_is_not_a_section_heading() -> None:
+    strategy = DottedNumberingStrategy()
+
+    assert strategy.match_clause_id("5. ПРАВА И ОБЯЗАННОСТИ РАБОТНИКА") == "5"
+    # Reads as a sentence, not a title: ends in a full stop and is mostly
+    # lower case.
+    assert strategy.match_clause_id("5. работник обязан оплатить услуги в срок.") is None
+
+
+def test_realistic_numbering_is_split_without_losing_text() -> None:
+    """Cover the shapes of a real employment contract in one document.
+
+    Three-level sub-items opening in lower case, single-level section headings
+    and an annex that restarts numbering - the combination that produced 106
+    boundaries out of 231 before this fix.
+    """
+
+    pages = load_document(FIXTURES_DIR / "clause_numbering.txt")
+    chunks = chunk_by_clause(pages)
+
+    clause_ids = [chunk.clause_id for chunk in chunks]
+    assert clause_ids.count("2.1.2") == 1
+    assert "3" in clause_ids and "4" in clause_ids
+    # The annex restarts at 1, so those identifiers occur twice.
+    assert clause_ids.count("1.1") == 2
+
+    def significant(text: str) -> str:
+        return "".join(text.split())
+
+    # Nothing may fall between the loader and the chunks.
+    assert significant("".join(chunk.text for chunk in chunks)) == significant(pages[0].text)
 
 
 def test_dotted_numbering_has_priority_over_other_strategies() -> None:
