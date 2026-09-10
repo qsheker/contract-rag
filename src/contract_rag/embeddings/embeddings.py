@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
@@ -147,12 +147,17 @@ def create_supabase_client_from_env() -> Any:
     return create_client(url, key)
 
 
-def embed_and_index(chunks: list[Chunk], supabase_client: Any) -> None:
-    """Embed every unique chunk and idempotently upsert it into Supabase."""
+def embed_and_index(chunks: list[Chunk], supabase_client: Any) -> list[str]:
+    """Embed every unique chunk, upsert it into Supabase and return its id.
+
+    The returned ids are what a caller re-indexing a whole document needs in
+    order to recognise the rows that are no longer part of it - see
+    ``delete_stale_chunks``.
+    """
 
     indexed_chunks = _assign_chunk_ids(chunks)
     if not indexed_chunks:
-        return
+        return []
 
     embeddings = get_default_embedder().embed_documents(
         [indexed_chunk.chunk for indexed_chunk in indexed_chunks]
@@ -172,6 +177,30 @@ def embed_and_index(chunks: list[Chunk], supabase_client: Any) -> None:
 
     for batch in _batched(rows, UPSERT_BATCH_SIZE):
         supabase_client.table(TABLE_NAME).upsert(batch, on_conflict="id").execute()
+
+    return [indexed_chunk.chunk_id for indexed_chunk in indexed_chunks]
+
+
+def delete_stale_chunks(
+    source_file: str,
+    keep_chunk_ids: Collection[str],
+    supabase_client: Any,
+) -> None:
+    """Drop rows of ``source_file`` that the latest indexing run did not write.
+
+    Upsert alone keeps a document free of duplicates but not free of leftovers:
+    re-indexing an edited file leaves the rows of clauses it no longer contains,
+    and a retrieved leftover would be cited as if it were still in the contract.
+    Call this only after the upsert has succeeded, so a failure mid-run leaves
+    the previous version of the document in place instead of nothing.
+    """
+
+    query = supabase_client.table(TABLE_NAME).delete().eq("source_file", source_file)
+    if keep_chunk_ids:
+        # PostgREST needs the survivors listed; there is no "not written by this
+        # run" predicate, and the id set of one document stays small.
+        query = query.not_.in_("id", sorted(keep_chunk_ids))
+    query.execute()
 
 
 def _assign_chunk_ids(chunks: Sequence[Chunk]) -> list[_IndexedChunk]:

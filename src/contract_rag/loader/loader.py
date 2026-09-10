@@ -237,6 +237,11 @@ _LOADERS: dict[str, Callable[[str | os.PathLike[str]], list[PageText]]] = {
 
 SUPPORTED_EXTENSIONS = frozenset(_LOADERS)
 
+# Formats whose loaders return page_number=None, so chunks from them can be
+# cited by clause but never by page. Interfaces that accept uploads need to say
+# so before the user asks a question and wonders where the page went.
+PAGELESS_EXTENSIONS = frozenset({".docx", ".txt"})
+
 
 def load_document(path: str | os.PathLike[str]) -> list[PageText]:
     """Load any supported document, dispatching on the file extension.

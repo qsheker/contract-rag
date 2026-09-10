@@ -8,6 +8,7 @@ from contract_rag.embeddings.embeddings import (
     QUERY_PREFIX,
     RoSBERTaEmbedder,
     create_supabase_client_from_env,
+    delete_stale_chunks,
     embed_and_index,
     get_default_embedder,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "QUERY_PREFIX",
     "RoSBERTaEmbedder",
     "create_supabase_client_from_env",
+    "delete_stale_chunks",
     "embed_and_index",
     "get_default_embedder",
 ]
