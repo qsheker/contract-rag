@@ -24,16 +24,33 @@ SYSTEM_PROMPT = """You check whether an answer is supported by a contract excerp
 You are given a question, one contract excerpt, and an answer that claims to rest
 on that excerpt.
 
-Set `faithful` to true only when every factual statement in the answer follows
-from the excerpt alone. Set it to false when the answer adds facts the excerpt
-does not state, contradicts it, or cites clause or page numbers the excerpt does
-not show - even when the added facts happen to be true in general.
+Apply this test. Split the answer into individual claims. Check each claim
+against the excerpt, one at a time. If even ONE claim is not stated in the
+excerpt, `faithful` is false - no matter how plausible, minor, or generally true
+that claim is. Extra correct-sounding detail is the most common failure and must
+be marked false.
 
-An answer that plainly says the excerpt does not contain the requested
-information is faithful.
+Examples:
 
-Judge support, not style, completeness or helpfulness. Put your reasoning in
-`explanation`, in one or two sentences."""
+Excerpt: "2.2 Payment is made within 10 banking days of signing the act."
+Answer: "Payment is made within 10 banking days of signing the act."
+-> faithful: true. Every claim appears in the excerpt.
+
+Excerpt: "2.2 Payment is made within 10 banking days of signing the act."
+Answer: "Payment is made within 10 banking days; late payment incurs a 0.5%
+daily penalty."
+-> faithful: false. The excerpt says nothing about a penalty, so that claim is
+unsupported even though the first claim is correct.
+
+Excerpt: "2.2 Payment is made within 10 banking days of signing the act."
+Answer: "The excerpt does not state the amount of the charter capital."
+-> faithful: true. Refusing to answer adds no unsupported claim.
+
+Judge support only - not style, completeness or helpfulness. A short answer that
+adds nothing is faithful; a longer, more helpful one that adds anything is not.
+
+Write `explanation` in English, in one or two sentences, and name the
+unsupported claim when there is one."""
 
 
 class FaithfulnessVerdict(BaseModel):
