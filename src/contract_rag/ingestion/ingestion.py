@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import unicodedata
 from typing import Any
 
 from contract_rag.chunker import chunk_by_clause
@@ -63,12 +64,18 @@ def normalize_filename(filename: str) -> str:
     The name ends up in ``Chunk.source_file``, in the row id and in citations
     shown to the user, so directory components - whether a browser's own path or
     a traversal attempt - are dropped rather than stored.
+
+    The result is composed (NFC) because the same name arrives in two byte
+    forms: macOS hands over a decomposed one, where "й" is "и" plus a combining
+    breve, while the same file from another source arrives composed. Since the
+    name is part of the row id, the two forms index one document twice - and the
+    second copy is invisible in the UI while competing for the same top-k slots.
     """
 
     source_file = os.path.basename(filename.replace("\\", "/").strip())
     if not source_file or source_file in {".", ".."}:
         raise ValueError(f"Upload carries no usable file name: {filename!r}")
-    return source_file
+    return unicodedata.normalize("NFC", source_file)
 
 
 def pageless_warnings(filename: str) -> list[str]:

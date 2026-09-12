@@ -1,3 +1,4 @@
+import unicodedata
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -297,6 +298,23 @@ def test_other_documents_survive_a_reupload(fake_client: FakeSupabaseClient) -> 
 )
 def test_normalize_filename_keeps_only_the_basename(supplied: str, expected: str) -> None:
     assert normalize_filename(supplied) == expected
+
+
+def test_normalize_filename_composes_a_decomposed_name() -> None:
+    """The same file from macOS and from elsewhere must be one document.
+
+    macOS hands over the name decomposed, so "Трудовой" carries "и" plus a
+    combining breve. Left alone, the two byte forms produce two source_file
+    values, two sets of rows and two copies competing for the same top-k slots
+    - with the duplicate invisible in the UI, because it is spelled identically.
+    """
+
+    decomposed = unicodedata.normalize("NFD", "Трудовой_договор.docx")
+    composed = unicodedata.normalize("NFC", "Трудовой_договор.docx")
+    assert decomposed != composed
+
+    assert normalize_filename(decomposed) == composed
+    assert normalize_filename(composed) == composed
 
 
 @pytest.mark.parametrize("supplied", ["", "   ", "/", ".", "..", "some/directory/"])
