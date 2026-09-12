@@ -31,8 +31,9 @@ dev = [
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
-# The HTTP layer lives in api/ next to src/, not inside the installed
-# package, so the repo root has to be importable for tests/test_api.py.
+# The HTTP layer in api/ and the eval harness in eval/ both live next to src/
+# rather than inside the installed package, so the repo root has to be
+# importable for the tests that cover them.
 pythonpath = ["."]
 
 [tool.ruff]

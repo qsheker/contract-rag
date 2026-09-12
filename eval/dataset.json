@@ -1,0 +1,114 @@
+[
+  {
+    "id": "q01",
+    "language": "ru",
+    "question": "На скольких языках и в скольких экземплярах составляется договор?",
+    "expected_clause_id": "5.3",
+    "expected_source_file": "corpus_raw/contracts/contract_01.pdf"
+  },
+  {
+    "id": "q02",
+    "language": "ru",
+    "question": "Куда передаются споры, если стороны не разрешили их путём переговоров?",
+    "expected_clause_id": "4.2",
+    "expected_source_file": "corpus_raw/contracts/contract_01.pdf"
+  },
+  {
+    "id": "q03",
+    "language": "ru",
+    "question": "С какого момента договор вступает в силу и как долго действует?",
+    "expected_clause_id": "5.1",
+    "expected_source_file": "corpus_raw/contracts/contract_01.pdf"
+  },
+  {
+    "id": "q04",
+    "language": "ru",
+    "question": "Кто обязан обеспечить студенту безопасные условия труда на рабочем месте?",
+    "expected_clause_id": "2.3",
+    "expected_source_file": "corpus_raw/contracts/contract_01.pdf"
+  },
+  {
+    "id": "q05",
+    "language": "kk",
+    "question": "Студенттің міндеттері қандай?",
+    "expected_clause_id": "2.5",
+    "expected_source_file": "corpus_raw/contracts/contract_01.pdf"
+  },
+  {
+    "id": "q06",
+    "language": "en",
+    "question": "When does the fiscal year of the company end?",
+    "expected_clause_id": "Section 5.1",
+    "expected_source_file": "corpus_raw/contracts/contract_02.pdf"
+  },
+  {
+    "id": "q07",
+    "language": "en",
+    "question": "How are profits and losses allocated among the members?",
+    "expected_clause_id": "Section 5.4",
+    "expected_source_file": "corpus_raw/contracts/contract_02.pdf"
+  },
+  {
+    "id": "q08",
+    "language": "en",
+    "question": "What events cause the company to be dissolved?",
+    "expected_clause_id": "Section 10.1.1",
+    "expected_source_file": "corpus_raw/contracts/contract_02.pdf"
+  },
+  {
+    "id": "q09",
+    "language": "en",
+    "question": "May a member contribute property or services instead of cash?",
+    "expected_clause_id": "Section 5.2",
+    "expected_source_file": "corpus_raw/contracts/contract_02.pdf"
+  },
+  {
+    "id": "q10",
+    "language": "en",
+    "question": "Is the memorandum of understanding legally binding on the parties?",
+    "expected_clause_id": "Legal Matters",
+    "expected_source_file": "corpus_raw/contracts/contract_03.pdf"
+  },
+  {
+    "id": "q11",
+    "language": "en",
+    "question": "What payment schedule did the parties agree on?",
+    "expected_clause_id": "Payments",
+    "expected_source_file": "corpus_raw/contracts/contract_03.pdf"
+  },
+  {
+    "id": "q12",
+    "language": "en",
+    "question": "How long does the memorandum of understanding remain in effect?",
+    "expected_clause_id": "Duration",
+    "expected_source_file": "corpus_raw/contracts/contract_03.pdf"
+  },
+  {
+    "id": "q13",
+    "language": "ru",
+    "question": "Каким кодексом руководствуются стороны по вопросам, не предусмотренным договором дарения?",
+    "expected_clause_id": "3",
+    "expected_source_file": "corpus_raw/contracts/contract_04.pdf"
+  },
+  {
+    "id": "q14",
+    "language": "ru",
+    "question": "Может ли одаряемый отказаться от дара и что он обязан возместить?",
+    "expected_clause_id": "2",
+    "expected_source_file": "corpus_raw/contracts/contract_04.pdf"
+  },
+  {
+    "id": "q15",
+    "language": "en",
+    "question": "Under which state law is the professional services company formed?",
+    "expected_clause_id": "OPERATING AGREEMENT",
+    "expected_source_file": "corpus_raw/contracts/contract_05.pdf"
+  },
+  {
+    "id": "q16",
+    "language": "en",
+    "question": "What counts as a Capital Contribution under this agreement?",
+    "expected_clause_id": "Definitions",
+    "expected_source_file": "corpus_raw/contracts/contract_05.pdf"
+  }
+]

@@ -76,6 +76,7 @@ Fill in `.env`:
 | `SUPABASE_URL` | yes | Dashboard → Project Settings → API |
 | `SUPABASE_KEY` | yes | the same page; the service role key if you want to write |
 | `GENERATION_MODEL` | yes | LiteLLM model string, e.g. `ollama/qwen2.5:7b` |
+| `JUDGE_MODEL` | only for `eval/` | the judge that scores answers; must differ from `GENERATION_MODEL` |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | only for that provider | not needed with Ollama |
 
 There is deliberately no default generation model: silently falling back to a
@@ -178,8 +179,7 @@ uv run pytest
 ```
 
 No test touches the network: providers, the embedding model and Supabase are all
-faked. The evaluation harness in `eval/` does hit live services and is therefore
-kept out of `tests/` and run by hand.
+faked.
 
 ```bash
 uv run ruff check api src tests
@@ -188,6 +188,19 @@ uv run ruff check api src tests
 ```bash
 npm run lint --prefix frontend
 ```
+
+### Evaluation
+
+The harness in `eval/` scores retrieval and answer faithfulness over a hand-
+labelled question set. It hits the live index and calls a model twice per
+question, so it is kept out of `tests/` and run by hand:
+
+```bash
+uv run python eval/run_eval.py
+```
+
+`JUDGE_MODEL` must differ from `GENERATION_MODEL`: a model asked to grade its
+own answers prefers them.
 
 ---
 
