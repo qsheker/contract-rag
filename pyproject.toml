@@ -5,12 +5,16 @@ description = "RAG pipeline for legal contracts with clause and page citations"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi>=0.141.1",
     "litellm",
+    "pydantic>=2.13.5",
     "pymupdf",
     "python-docx",
     "python-dotenv",
+    "python-multipart>=0.0.32",
     "sentence-transformers",
     "supabase",
+    "uvicorn[standard]>=0.52.4",
 ]
 
 [build-system]
@@ -19,6 +23,7 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest",
     "ruff",
 ]
@@ -26,7 +31,9 @@ dev = [
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
-# The eval harness lives outside src/ but is still worth testing.
+# The HTTP layer in api/ and the eval harness in eval/ both live next to src/
+# rather than inside the installed package, so the repo root has to be
+# importable for the tests that cover them.
 pythonpath = ["."]
 
 [tool.ruff]

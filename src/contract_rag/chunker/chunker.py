@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar
 
 from contract_rag.loader import PageText
@@ -16,6 +16,15 @@ class Chunk:
 
     ``page_number`` is ``None`` when the source format has no pages (DOCX, TXT);
     such a chunk can still be cited by clause, but not by page.
+
+    ``context`` holds the heading lines this chunk hangs under - its section
+    title and the clause that introduces it. It exists because a sub-item read
+    on its own is a fragment: "3.1.1. a five-day working week" means little
+    without "3.1. The employee is assigned normal working hours:". It is fed to
+    the embedding so retrieval can see that framing, and it is deliberately kept
+    out of ``text``, which stays exactly what the document says and is what a
+    citation shows. It is ``None`` for a chunk with no ancestors, and also for a
+    chunk read back out of the index, where only ``text`` was stored.
     """
 
     text: str
@@ -23,6 +32,7 @@ class Chunk:
     page_number: int | None
     source_file: str
     detected_strategy: str
+    context: str | None = None
 
     def __post_init__(self) -> None:
         if self.page_number is None:
@@ -80,11 +90,13 @@ class ChunkStrategy(ABC):
         if len(boundaries) < self.minimum_matches:
             return None
 
-        return _build_chunks(
-            line_records=line_records,
-            boundaries=boundaries,
-            source_file=source_file,
-            strategy_name=self.name,
+        return _with_ancestor_context(
+            _build_chunks(
+                line_records=line_records,
+                boundaries=boundaries,
+                source_file=source_file,
+                strategy_name=self.name,
+            )
         )
 
     @abstractmethod
@@ -93,26 +105,61 @@ class ChunkStrategy(ABC):
 
 
 class DottedNumberingStrategy(ChunkStrategy):
-    """Detect dotted clause identifiers such as ``4.2`` and ``4.2.1``."""
+    """Detect dotted clause identifiers such as ``4.2`` and ``4.2.1``.
+
+    Also detects the single-level section headings those clauses hang under
+    (``6. RIGHTS AND OBLIGATIONS``), because without them a whole section lands
+    inside the last clause of the previous one and every fact in it gets cited
+    under that clause's number.
+    """
 
     name = "dotted_numbering"
-    _pattern = re.compile(
-        r"^\s*(?P<clause_id>\d+\.\d+(?:\.\d+)?)(?:\.(?!\d))?(?=\s|$)"
+    _clause_pattern = re.compile(
+        r"^\s*(?P<clause_id>\d+\.\d+(?:\.\d+)?)(?P<terminator>\.(?!\d))?(?=\s|$)"
     )
+    _section_pattern = re.compile(r"^\s*(?P<clause_id>\d{1,2})\.(?=\s|$)")
 
     def match_clause_id(self, line: str) -> str | None:
-        match = self._pattern.match(line)
-        if not match:
-            return None
+        clause_match = self._clause_pattern.match(line)
+        if clause_match:
+            return (
+                clause_match.group("clause_id")
+                if self._starts_a_clause(line, clause_match)
+                else None
+            )
 
+        # Tried second on purpose: "5.1." must be read as clause 5.1, not as
+        # section 5 followed by a stray "1.".
+        section_match = self._section_pattern.match(line)
+        if section_match and _looks_like_heading(line[section_match.end() :]):
+            return section_match.group("clause_id")
+        return None
+
+    @staticmethod
+    def _starts_a_clause(line: str, match: re.Match[str]) -> bool:
+        """Tell a numbered item apart from a cross-reference wrapped onto a line.
+
+        A PDF line break can push a reference to the start of a line - "...in
+        accordance with clause\n6.2.6 shall be applied" - where it looks exactly
+        like a clause opening. Two things distinguish a real item:
+
+        * it terminates its own number ("4.9.3. для возмещения..."), which prose
+          quoting a clause number does not do;
+        * or the text after it starts a new sentence with a capital.
+
+        Requiring the capital alone, as this did before, threw away every Russian
+        sub-item that continues the parent clause's sentence in lower case - 125
+        of 231 boundaries in one real employment contract.
+        """
+
+        if match.group("terminator"):
+            return True
         remainder = line[match.end() :].strip()
         first_following_letter = next(
             (character for character in remainder if character.isalpha()),
             None,
         )
-        if first_following_letter is not None and first_following_letter.islower():
-            return None
-        return match.group("clause_id")
+        return first_following_letter is None or not first_following_letter.islower()
 
 
 class VerboseNumberingStrategy(ChunkStrategy):
@@ -159,16 +206,10 @@ class HeadingOnlyStrategy(ChunkStrategy):
 
     def match_clause_id(self, line: str) -> str | None:
         heading = " ".join(line.split())
-        if not heading or len(heading) > 100:
-            return None
-        if len(heading.split()) > 12:
-            return None
         if self._leading_marker.match(heading):
             return None
-        if heading[-1] in ".;,:!?" or ";" in heading:
-            return None
         if (
-            DottedNumberingStrategy._pattern.match(heading)
+            DottedNumberingStrategy._clause_pattern.match(heading)
             or VerboseNumberingStrategy().match_clause_id(heading) is not None
         ):
             return None
@@ -176,15 +217,40 @@ class HeadingOnlyStrategy(ChunkStrategy):
             heading.startswith("{") and heading.endswith("}")
         ):
             return None
-
-        words = self._word.findall(heading)
-        if not words:
-            return None
-        uppercase_initials = sum(word[0].isupper() for word in words)
-        is_title_like = uppercase_initials / len(words) >= 0.6
-        if not heading.isupper() and not is_title_like:
+        if not _looks_like_heading(heading):
             return None
         return heading
+
+
+_HEADING_MAX_CHARS = 100
+_HEADING_MAX_WORDS = 12
+# A heading is mostly capitalised; prose that happens to be short is not.
+_HEADING_TITLE_CASE_RATIO = 0.6
+_HEADING_WORD = re.compile(r"[^\W\d_]+", flags=re.UNICODE)
+
+
+def _looks_like_heading(text: str) -> bool:
+    """Return whether ``text`` reads as a title rather than as a sentence.
+
+    Shared by the two strategies that need the question answered so they cannot
+    disagree: ``HeadingOnlyStrategy`` for unnumbered titles, and
+    ``DottedNumberingStrategy`` for the text following a section number.
+    """
+
+    heading = " ".join(text.split())
+    if not heading or len(heading) > _HEADING_MAX_CHARS:
+        return False
+    if len(heading.split()) > _HEADING_MAX_WORDS:
+        return False
+    # A title carries no sentence punctuation; a wrapped sentence fragment does.
+    if heading[-1] in ".;,:!?" or ";" in heading:
+        return False
+
+    words = _HEADING_WORD.findall(heading)
+    if not words:
+        return False
+    uppercase_initials = sum(word[0].isupper() for word in words)
+    return heading.isupper() or uppercase_initials / len(words) >= _HEADING_TITLE_CASE_RATIO
 
 
 _STRATEGIES: tuple[ChunkStrategy, ...] = (
@@ -278,6 +344,38 @@ def _build_chunks(
         )
 
     return chunks
+
+
+def _with_ancestor_context(chunks: list[Chunk]) -> list[Chunk]:
+    """Attach each chunk's ancestor headings, taken from the chunks before it.
+
+    Only the opening line of an ancestor is carried: that is its heading, and
+    dragging in the ancestor's whole body would put the same paragraphs into
+    every descendant's embedding.
+    """
+
+    opening_lines: dict[str, str] = {}
+    contextualized: list[Chunk] = []
+    for chunk in chunks:
+        ancestor_headings = [
+            opening_lines[ancestor_id]
+            for ancestor_id in _ancestor_ids(chunk.clause_id)
+            if ancestor_id in opening_lines
+        ]
+        contextualized.append(replace(chunk, context="\n".join(ancestor_headings) or None))
+        if chunk.clause_id:
+            opening_lines[chunk.clause_id] = chunk.text.splitlines()[0]
+
+    return contextualized
+
+
+def _ancestor_ids(clause_id: str | None) -> list[str]:
+    """Return the enclosing identifiers of ``4.9.3``, outermost first: 4, 4.9."""
+
+    if not clause_id:
+        return []
+    parts = clause_id.split(".")
+    return [".".join(parts[:depth]) for depth in range(1, len(parts))]
 
 
 def _join_records(records: list[_LineRecord]) -> str:

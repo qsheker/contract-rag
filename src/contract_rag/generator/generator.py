@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -14,6 +15,14 @@ from contract_rag.chunker import Chunk
 MODEL_ENV_VAR = "GENERATION_MODEL"
 # Deterministic output: the same question over the same chunks must not drift.
 TEMPERATURE = 0
+# Ollama runs a model with a 4096-token window by default however large a window
+# the model itself supports, and silently truncates anything longer - taking the
+# rules at the top of the prompt rather than the excerpts at the bottom. Asked
+# for explicitly because a lead-in clause now arrives with its sub-items, so the
+# excerpts alone can approach that ceiling. Sent only to Ollama: it is an
+# option of that server, and other providers reject what they do not know.
+OLLAMA_MODEL_PREFIX = "ollama/"
+OLLAMA_CONTEXT_TOKENS = 8192
 
 SYSTEM_PROMPT = """You answer questions about legal contracts.
 
@@ -26,7 +35,22 @@ Rules:
 4. Copy `clause_id`, `page_number` and `source_file` into each citation exactly
    as the excerpt shows them. Use null where the excerpt shows null - some
    formats have no page numbers.
-5. Answer in the same language as the question."""
+5. Answer in the same language as the question, whatever language the excerpts
+   are in.
+6. Write `text` as prose a person reads: never repeat `clause_id`,
+   `source_file` or `page_number` inside it. They are returned in `citations`
+   and shown beside the answer, so spelling them out again only clutters it."""
+
+# Rule 5 is not enough on its own: a 7B model reads the language off the
+# excerpts instead of the question, and a Russian question over a mixed corpus
+# has come back in English and in Chinese. The language is worked out here and
+# named next to the question, where the instruction is hardest to overlook.
+LANGUAGE_INSTRUCTION = "Write `text` in {language}."
+FALLBACK_LANGUAGE_INSTRUCTION = "Write `text` in the language of the question above."
+# Kazakh and Russian share the alphabet, so only these letters tell them apart.
+KAZAKH_LETTERS = frozenset("әғқңөұүһіӘҒҚҢӨҰҮҺІ")
+_CYRILLIC = re.compile(r"[\u0400-\u04ff]")
+_LATIN = re.compile(r"[A-Za-z]")
 
 
 class Citation(BaseModel):
@@ -46,6 +70,19 @@ class Answer(BaseModel):
 
 class GenerationError(Exception):
     """Raised when the provider fails or returns something unusable."""
+
+
+class UnsupportedCitationError(GenerationError):
+    """Raised when the answer cites something that was never in the context.
+
+    A distinct type rather than a message to grep: a caller showing this to a
+    person needs to say "the answer was withheld because its references could
+    not be verified", which is a different sentence from "the provider broke".
+    """
+
+    def __init__(self, citations: Sequence[Citation], described: str) -> None:
+        super().__init__(f"Answer cited excerpts that were not supplied: {described}")
+        self.citations = list(citations)
 
 
 def get_generation_model_from_env() -> str:
@@ -92,6 +129,7 @@ class AnswerGenerator:
                 messages=messages,
                 response_format=Answer,
                 temperature=TEMPERATURE,
+                **_provider_options(model),
             )
         except Exception as error:  # every provider raises its own exception type
             raise GenerationError(f"Generation failed for model {model}: {error}") from error
@@ -121,6 +159,14 @@ def generate_answer(
     return AnswerGenerator(model=model, completion_fn=completion_fn).generate(query, chunks)
 
 
+def _provider_options(model: str) -> dict[str, Any]:
+    """Return the provider-specific options this model needs, if any."""
+
+    if model.startswith(OLLAMA_MODEL_PREFIX):
+        return {"num_ctx": OLLAMA_CONTEXT_TOKENS}
+    return {}
+
+
 def _build_user_message(query: str, chunks: Sequence[Chunk]) -> str:
     if not chunks:
         excerpts = "(no excerpts were retrieved)"
@@ -128,7 +174,36 @@ def _build_user_message(query: str, chunks: Sequence[Chunk]) -> str:
         excerpts = "\n\n".join(
             _format_excerpt(position, chunk) for position, chunk in enumerate(chunks, start=1)
         )
-    return f"Contract excerpts:\n\n{excerpts}\n\nQuestion: {query}"
+    return (
+        f"Contract excerpts:\n\n{excerpts}\n\n"
+        f"Question: {query}\n\n{_language_instruction(query)}"
+    )
+
+
+def detect_question_language(query: str) -> str | None:
+    """Name the language of ``query``, or None when the script does not say.
+
+    Deliberately a script check rather than a library or a model call: the
+    three languages this corpus is asked in are separable by alphabet, and the
+    answer has to be the same on every run for the same question.
+    """
+
+    if KAZAKH_LETTERS & set(query):
+        return "Kazakh"
+    cyrillic = len(_CYRILLIC.findall(query))
+    latin = len(_LATIN.findall(query))
+    if cyrillic and cyrillic >= latin:
+        return "Russian"
+    if latin:
+        return "English"
+    return None
+
+
+def _language_instruction(query: str) -> str:
+    language = detect_question_language(query)
+    if language is None:
+        return FALLBACK_LANGUAGE_INSTRUCTION
+    return LANGUAGE_INSTRUCTION.format(language=language)
 
 
 def _format_excerpt(position: int, chunk: Chunk) -> str:
@@ -180,4 +255,4 @@ def _reject_unsupported_citations(answer: Answer, chunks: Sequence[Chunk]) -> No
             f"{citation.source_file}::{citation.clause_id}::page-{citation.page_number}"
             for citation in unsupported
         )
-        raise GenerationError(f"Answer cited excerpts that were not supplied: {described}")
+        raise UnsupportedCitationError(unsupported, described)

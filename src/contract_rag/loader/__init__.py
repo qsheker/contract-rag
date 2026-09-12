@@ -1,6 +1,7 @@
 """Public API for page-oriented document loading and cleanup."""
 
 from contract_rag.loader.loader import (
+    PAGELESS_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
     LoaderError,
     LoaderErrorCode,
@@ -16,6 +17,7 @@ from contract_rag.loader.loader import (
 )
 
 __all__ = [
+    "PAGELESS_EXTENSIONS",
     "SUPPORTED_EXTENSIONS",
     "LoaderError",
     "LoaderErrorCode",

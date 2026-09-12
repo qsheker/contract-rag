@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 import os
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 
@@ -20,6 +21,16 @@ MODEL_TOKEN_LIMIT = 512
 EMBEDDING_DIMENSION = 1024
 TABLE_NAME = "contract_chunks"
 UPSERT_BATCH_SIZE = 50
+# A chunk shorter than this is a fragment and gets its headings prepended
+# before encoding; a longer one already carries its own framing. Measured,
+# not guessed: prepending headings to every chunk broadened the long ones
+# topically enough to push correct answers out of top-5 and cost the eval set
+# one question (12/14 -> 11/14). The regression appears above ~600 characters,
+# and 400 still frames 93% of the real sub-item fragments.
+CONTEXT_MAX_CHARS = 400
+# Room for one delete filter in the query string, well under the request-line
+# limit a gateway will accept. Only stale ids ever go here, so it is rarely hit.
+FILTER_BUDGET_BYTES = 3000
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +72,17 @@ class RoSBERTaEmbedder:
         self._model = model
 
     def embed_documents(self, chunks: Sequence[Chunk]) -> list[list[float]]:
-        """Embed clean chunk text with the required retrieval prefix."""
+        """Embed chunk text, framing short chunks with their headings.
+
+        What is encoded is not quite what is stored: a short chunk's ancestor
+        headings are prepended so a sub-item is searchable by what it is about,
+        while the stored ``text`` - and therefore every citation - stays exactly
+        what the document says. See ``Chunk.context`` and ``CONTEXT_MAX_CHARS``.
+        """
 
         prefixed_texts: list[str] = []
         for chunk in chunks:
-            prefixed_text = f"{DOCUMENT_PREFIX}{chunk.text}"
+            prefixed_text = f"{DOCUMENT_PREFIX}{_with_context(chunk)}"
             if self._token_count(prefixed_text) > self._model.max_seq_length:
                 logger.warning(
                     "Embedding input truncated to %d tokens: source_file=%s clause_id=%s",
@@ -147,12 +164,17 @@ def create_supabase_client_from_env() -> Any:
     return create_client(url, key)
 
 
-def embed_and_index(chunks: list[Chunk], supabase_client: Any) -> None:
-    """Embed every unique chunk and idempotently upsert it into Supabase."""
+def embed_and_index(chunks: list[Chunk], supabase_client: Any) -> list[str]:
+    """Embed every unique chunk, upsert it into Supabase and return its id.
+
+    The returned ids are what a caller re-indexing a whole document needs in
+    order to recognise the rows that are no longer part of it - see
+    ``delete_stale_chunks``.
+    """
 
     indexed_chunks = _assign_chunk_ids(chunks)
     if not indexed_chunks:
-        return
+        return []
 
     embeddings = get_default_embedder().embed_documents(
         [indexed_chunk.chunk for indexed_chunk in indexed_chunks]
@@ -172,6 +194,70 @@ def embed_and_index(chunks: list[Chunk], supabase_client: Any) -> None:
 
     for batch in _batched(rows, UPSERT_BATCH_SIZE):
         supabase_client.table(TABLE_NAME).upsert(batch, on_conflict="id").execute()
+
+    return [indexed_chunk.chunk_id for indexed_chunk in indexed_chunks]
+
+
+def delete_stale_chunks(
+    source_file: str,
+    keep_chunk_ids: Collection[str],
+    supabase_client: Any,
+) -> None:
+    """Drop rows of ``source_file`` that the latest indexing run did not write.
+
+    Upsert alone keeps a document free of duplicates but not free of leftovers:
+    re-indexing an edited file leaves the rows of clauses it no longer contains,
+    and a retrieved leftover would be cited as if it were still in the contract.
+    Call this only after the upsert has succeeded, so a failure mid-run leaves
+    the previous version of the document in place instead of nothing.
+
+    The stale ids are worked out here rather than handed to PostgREST as a
+    "not in (survivors)" filter. Every filter value travels in the query string,
+    and ids are ``source_file::clause_id``: a long non-ASCII file name expands
+    to nine URL-encoded bytes per character, so listing the survivors of a
+    whole document overruns the request line and the gateway answers a bare
+    ``Bad Request``. Naming only what has to go usually means naming nothing:
+    a first upload has no stale rows and issues no delete at all.
+    """
+
+    kept = set(keep_chunk_ids)
+    response = (
+        supabase_client.table(TABLE_NAME).select("id").eq("source_file", source_file).execute()
+    )
+    stale_ids = [
+        row["id"] for row in (getattr(response, "data", None) or []) if row["id"] not in kept
+    ]
+    if not stale_ids:
+        return
+
+    for batch in _batched_filter_values(stale_ids):
+        supabase_client.table(TABLE_NAME).delete().in_("id", batch).execute()
+
+    logger.info("Removed %d stale chunk(s) of %s", len(stale_ids), source_file)
+
+
+def _batched_filter_values(values: Sequence[str]) -> Iterable[list[str]]:
+    """Group ids into batches whose URL-encoded length stays within the budget.
+
+    Batched by encoded size rather than by count: how many ids fit depends on
+    the file name, and a fixed count that works for ``contract.pdf`` overruns
+    the request line for a long Cyrillic one.
+    """
+
+    batch: list[str] = []
+    batch_length = 0
+    for value in values:
+        # Every id contains "::", so PostgREST quotes it; the quotes are encoded
+        # too. One extra byte covers the separating comma.
+        encoded_length = len(quote(f'"{value}"')) + 1
+        if batch and batch_length + encoded_length > FILTER_BUDGET_BYTES:
+            yield batch
+            batch = []
+            batch_length = 0
+        batch.append(value)
+        batch_length += encoded_length
+    if batch:
+        yield batch
 
 
 def _assign_chunk_ids(chunks: Sequence[Chunk]) -> list[_IndexedChunk]:
@@ -198,6 +284,14 @@ def _assign_chunk_ids(chunks: Sequence[Chunk]) -> list[_IndexedChunk]:
             )
 
     return [_IndexedChunk(chunk_id=assigned_ids[chunk], chunk=chunk) for chunk in unique_chunks]
+
+
+def _with_context(chunk: Chunk) -> str:
+    """Return the text to encode, framed by the chunk's headings when it is short."""
+
+    if not chunk.context or len(chunk.text) >= CONTEXT_MAX_CHARS:
+        return chunk.text
+    return f"{chunk.context}\n{chunk.text}"
 
 
 def _base_chunk_id(chunk: Chunk) -> str:
