@@ -6,12 +6,14 @@ import contract_rag.generator.generator as generator_module
 from contract_rag.chunker import Chunk
 from contract_rag.generator import (
     MODEL_ENV_VAR,
+    OLLAMA_CONTEXT_TOKENS,
     SYSTEM_PROMPT,
     TEMPERATURE,
     Answer,
     AnswerGenerator,
     Citation,
     GenerationError,
+    detect_question_language,
     generate_answer,
     get_generation_model_from_env,
 )
@@ -282,3 +284,79 @@ def test_page_invented_for_a_pageless_chunk_is_rejected() -> None:
 
     with pytest.raises(GenerationError, match="not supplied"):
         generate_answer("Вопрос?", [chunk], model=TEST_MODEL, completion_fn=completion)
+
+
+def test_ollama_is_asked_for_a_window_large_enough_for_the_excerpts() -> None:
+    """Ollama's default 4096-token window is smaller than what is now sent.
+
+    A lead-in clause reaches generation together with its sub-items, and an
+    over-long prompt is truncated where it hurts most: the rules at the top go
+    first, so the model would stop being told to cite at all.
+    """
+
+    completion = FakeCompletion(answer_payload("Ответ.", []))
+
+    generate_answer("Вопрос?", [make_chunk("2.2")], model=TEST_MODEL, completion_fn=completion)
+
+    assert completion.calls[0]["num_ctx"] == OLLAMA_CONTEXT_TOKENS
+
+
+def test_a_provider_that_is_not_ollama_is_not_sent_an_ollama_option() -> None:
+    completion = FakeCompletion(answer_payload("Ответ.", []))
+
+    generate_answer(
+        "Вопрос?",
+        [make_chunk("2.2")],
+        model="anthropic/claude-opus-5",
+        completion_fn=completion,
+    )
+
+    assert "num_ctx" not in completion.calls[0]
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("А кто я", "Russian"),
+        ("Какой срок оплаты по Article 5?", "Russian"),
+        ("Төлем мерзімі қандай?", "Kazakh"),
+        ("What is the payment term?", "English"),
+        ("支付期限是多少？", None),
+    ],
+)
+def test_the_question_language_is_read_from_its_alphabet(
+    query: str, expected: str | None
+) -> None:
+    # Kazakh shares the Russian alphabet apart from a handful of letters, and a
+    # Russian question quoting an English clause name is still Russian.
+    assert detect_question_language(query) == expected
+
+
+def test_the_answer_language_is_named_next_to_the_question() -> None:
+    """Rule 5 alone did not hold: a Russian question came back in Chinese.
+
+    The model read the language off the excerpts - half the corpus is English -
+    rather than off the question. Naming it beside the question makes it a
+    concrete instruction instead of a general one.
+    """
+
+    completion = FakeCompletion(answer_payload("Ответ.", []))
+
+    generate_answer("А кто я", [make_chunk("2.2")], model=TEST_MODEL, completion_fn=completion)
+
+    user_message = completion.calls[0]["messages"][1]["content"]
+    assert user_message.endswith("Write `text` in Russian.")
+
+
+def test_an_unrecognised_alphabet_falls_back_to_the_question_itself() -> None:
+    completion = FakeCompletion(answer_payload("答案。", []))
+
+    generate_answer(
+        "支付期限是多少？",
+        [make_chunk("2.2")],
+        model=TEST_MODEL,
+        completion_fn=completion,
+    )
+
+    user_message = completion.calls[0]["messages"][1]["content"]
+    assert user_message.endswith("Write `text` in the language of the question above.")

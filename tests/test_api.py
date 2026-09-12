@@ -21,7 +21,7 @@ from contract_rag.loader import (
     NoTextLayerError,
     UnsupportedFormatError,
 )
-from contract_rag.retriever import RetrievedChunk
+from contract_rag.retriever import ContextChunk, RetrievedChunk
 
 TEST_MODEL = "ollama/qwen2.5:7b"
 ORIGIN = ALLOWED_ORIGINS[0]
@@ -45,6 +45,18 @@ class FakeChoice:
 class FakeResponse:
     def __init__(self, content: str) -> None:
         self.choices = [FakeChoice(content)]
+
+
+# Filled by the retrieval fake so a test can assert what scope reached search.
+SEARCH_SCOPES: list[list[str] | None] = []
+
+SUB_ITEM_CHUNK = Chunk(
+    text="2.2.1. в безналичном порядке на счёт, указанный Исполнителем;",
+    clause_id="2.2.1",
+    page_number=4,
+    source_file="contract_01.pdf",
+    detected_strategy="dotted_numbering",
+)
 
 
 def make_chunk(clause_id: str | None = "2.2", page_number: int | None = 4) -> Chunk:
@@ -94,25 +106,47 @@ def retrieval_and_generation(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     queries: list[str] = []
     chunk = make_chunk()
+    scopes = SEARCH_SCOPES
+    scopes.clear()
 
     def fake_retrieve(query: str, k: int = 5, **kwargs: Any) -> list[RetrievedChunk]:
         queries.append(query)
+        scopes.append(kwargs.get("source_files"))
         return [RetrievedChunk(chunk=chunk, chunk_id="contract_01.pdf::2.2", similarity=0.81)]
+
+    def fake_expand(
+        hits: Sequence[RetrievedChunk], **kwargs: Any
+    ) -> list[ContextChunk]:
+        """Stand in for the real expansion: the hit plus one sub-item of it.
+
+        Faked rather than patched out, because the endpoint has to be seen
+        handing generation more than search returned - that is the whole point
+        of the step, and the excerpt list is how the UI learns about it.
+        """
+
+        context = [
+            ContextChunk(chunk=hit.chunk, chunk_id=hit.chunk_id, similarity=hit.similarity)
+            for hit in hits
+        ]
+        context.append(
+            ContextChunk(chunk=SUB_ITEM_CHUNK, chunk_id="contract_01.pdf::2.2.1", similarity=None)
+        )
+        return context
 
     def fake_generate_answer(query: str, chunks: Sequence[Chunk], **kwargs: Any) -> Answer:
         return Answer(
             text="Оплата производится в течение 10 банковских дней.",
             citations=[
                 Citation(
-                    clause_id=chunk.clause_id,
-                    page_number=chunk.page_number,
-                    source_file=chunk.source_file,
+                    clause_id=chunks[0].clause_id,
+                    page_number=chunks[0].page_number,
+                    source_file=chunks[0].source_file,
                 )
-                for chunk in chunks
             ],
         )
 
     monkeypatch.setattr(main_module, "retrieve", fake_retrieve)
+    monkeypatch.setattr(main_module, "expand_with_related_clauses", fake_expand)
     monkeypatch.setattr(main_module, "generate_answer", fake_generate_answer)
     return queries
 
@@ -153,11 +187,43 @@ def test_the_response_carries_the_answer_its_citations_and_the_query(
     response = client.post("/chat", json={"message": "Какой срок оплаты?"})
 
     payload = response.json()
-    assert set(payload) == {"answer", "citations", "standalone_query"}
+    assert set(payload) == {"answer", "citations", "standalone_query", "excerpts"}
     assert payload["answer"] == "Оплата производится в течение 10 банковских дней."
     assert payload["citations"] == [
         {"clause_id": "2.2", "page_number": 4, "source_file": "contract_01.pdf"}
     ]
+
+
+def test_every_citation_arrives_with_the_text_it_points_at(client: TestClient) -> None:
+    # A citation the reader cannot open is only half a citation: the badge names
+    # a clause, and the text is what lets them check the answer against it.
+    payload = client.post("/chat", json={"message": "Какой срок оплаты?"}).json()
+
+    cited = [excerpt for excerpt in payload["excerpts"] if excerpt["cited"]]
+    assert [excerpt["clause_id"] for excerpt in cited] == ["2.2"]
+    assert cited[0]["text"] == "Оплата производится в течение 10 банковских дней."
+    assert {citation["clause_id"] for citation in payload["citations"]} == {
+        excerpt["clause_id"] for excerpt in cited
+    }
+
+
+def test_the_excerpts_show_what_was_supplied_but_left_uncited(client: TestClient) -> None:
+    """A weak answer is explained by what was in front of the model.
+
+    The sub-item pulled in beside the hit is exactly that: it went to the model,
+    the answer did not use it, and without this the reader could not tell the
+    difference between "the contract does not say" and "search brought nothing
+    that says it".
+    """
+
+    payload = client.post("/chat", json={"message": "Какой срок оплаты?"}).json()
+
+    uncited = [excerpt for excerpt in payload["excerpts"] if not excerpt["cited"]]
+    assert [excerpt["clause_id"] for excerpt in uncited] == ["2.2.1"]
+    # Pulled in as a neighbour rather than found by search, and saying so is how
+    # the UI can separate the two.
+    assert uncited[0]["similarity"] is None
+    assert payload["excerpts"][0]["similarity"] == 0.81
 
 
 def test_a_pageless_citation_keeps_a_null_page_number(
@@ -404,3 +470,4 @@ def test_an_unexpected_crash_answers_with_a_readable_cors_enabled_500(
     # Without the header the browser discards the body and the UI can only say
     # "Failed to fetch", which is what sent us looking in the server log.
     assert response.headers["access-control-allow-origin"] == ORIGIN
+

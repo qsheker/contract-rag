@@ -2,6 +2,7 @@
 
 from contract_rag.generator.generator import (
     MODEL_ENV_VAR,
+    OLLAMA_CONTEXT_TOKENS,
     SYSTEM_PROMPT,
     TEMPERATURE,
     Answer,
@@ -9,12 +10,14 @@ from contract_rag.generator.generator import (
     Citation,
     GenerationError,
     UnsupportedCitationError,
+    detect_question_language,
     generate_answer,
     get_generation_model_from_env,
 )
 
 __all__ = [
     "MODEL_ENV_VAR",
+    "OLLAMA_CONTEXT_TOKENS",
     "SYSTEM_PROMPT",
     "TEMPERATURE",
     "Answer",
@@ -22,6 +25,7 @@ __all__ = [
     "Citation",
     "GenerationError",
     "UnsupportedCitationError",
+    "detect_question_language",
     "generate_answer",
     "get_generation_model_from_env",
 ]

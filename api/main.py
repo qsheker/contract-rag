@@ -24,7 +24,12 @@ from contract_rag.generator import (
 )
 from contract_rag.ingestion import ingest_document, normalize_filename, pageless_warnings
 from contract_rag.loader import LoaderError, LoaderErrorCode, UnsupportedFormatError
-from contract_rag.retriever import DEFAULT_MATCH_COUNT, retrieve
+from contract_rag.retriever import (
+    DEFAULT_MATCH_COUNT,
+    ContextChunk,
+    expand_with_related_clauses,
+    retrieve,
+)
 
 # uvicorn configures only its own loggers, leaving the root logger on the
 # WARNING-level fallback handler: without this every logger.info in the project
@@ -72,6 +77,10 @@ class ChatRequest(BaseModel):
 
     message: str
     history: list[ChatMessage] = []
+    # The documents this conversation is about, as the client remembers them.
+    # Empty means every indexed document, which is what a chat that uploaded
+    # nothing of its own still wants.
+    source_files: list[str] = []
 
     @field_validator("message")
     @classmethod
@@ -82,12 +91,33 @@ class ChatRequest(BaseModel):
         return stripped
 
 
+class Excerpt(BaseModel):
+    """One clause the answer was written from, verbatim.
+
+    ``cited`` marks the ones the answer actually stands on; the rest are what
+    was in front of the model and went unused. Both are returned because a
+    citation the reader cannot open is only half a citation, and because a poor
+    answer is explained by what search supplied - which is otherwise invisible
+    outside the server log.
+    """
+
+    clause_id: str | None
+    page_number: int | None
+    source_file: str
+    text: str
+    cited: bool
+    # None when the clause was pulled in as a neighbour of a hit rather than
+    # found by search itself.
+    similarity: float | None
+
+
 class ChatResponse(BaseModel):
     """The answer, what it cites, and the query retrieval actually ran on."""
 
     answer: str
     citations: list[Citation]
     standalone_query: str
+    excerpts: list[Excerpt]
 
 
 class DocumentResponse(BaseModel):
@@ -145,7 +175,7 @@ app.add_middleware(BaseHTTPMiddleware, dispatch=report_unexpected_errors)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(ALLOWED_ORIGINS),
-    allow_methods=["GET", "POST"],
+    allow_methods=["POST"],
     allow_headers=["*"],
 )
 
@@ -160,9 +190,17 @@ def chat(request: ChatRequest) -> ChatResponse:
     history = [turn.model_dump() for turn in request.history]
     standalone_query = reformulate_query(history, request.message)
 
-    hits = retrieve(standalone_query, k=DEFAULT_MATCH_COUNT)
+    hits = retrieve(
+        standalone_query,
+        k=DEFAULT_MATCH_COUNT,
+        source_files=request.source_files or None,
+    )
+    # Exact clause boundaries leave a lead-in like "5.2. Работник обязан:" as a
+    # chunk of its own: the best match for a question whose answer is entirely
+    # in its sub-items. The expansion hands those over too.
+    context = expand_with_related_clauses(hits)
     try:
-        answer = generate_answer(standalone_query, [hit.chunk for hit in hits])
+        answer = generate_answer(standalone_query, [entry.chunk for entry in context])
     except UnsupportedCitationError as error:
         # The rejection is correct and the detail - a list of row ids - belongs
         # in the log, not on screen. What the reader needs is why they have no
@@ -188,6 +226,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         answer=answer.text,
         citations=answer.citations,
         standalone_query=standalone_query,
+        excerpts=_describe_excerpts(context, answer.citations),
     )
 
 
@@ -228,6 +267,38 @@ def upload_document(file: UploadFile = File(...)) -> DocumentResponse:  # noqa: 
         chunks_indexed=chunks_indexed,
         warnings=pageless_warnings(filename),
     )
+
+
+def _describe_excerpts(
+    context: list[ContextChunk],
+    citations: list[Citation],
+) -> list[Excerpt]:
+    """Mark each supplied clause as cited or not, by the same key the check uses.
+
+    Deliberately the triple ``generate_answer`` verifies against: if the answer
+    passed that check, every citation matches an excerpt here, and the UI cannot
+    end up showing a citation it has no text for.
+    """
+
+    cited_keys = {
+        (citation.source_file, citation.clause_id, citation.page_number) for citation in citations
+    }
+    return [
+        Excerpt(
+            clause_id=entry.chunk.clause_id,
+            page_number=entry.chunk.page_number,
+            source_file=entry.chunk.source_file,
+            text=entry.chunk.text,
+            cited=(
+                entry.chunk.source_file,
+                entry.chunk.clause_id,
+                entry.chunk.page_number,
+            )
+            in cited_keys,
+            similarity=entry.similarity,
+        )
+        for entry in context
+    ]
 
 
 def _require_filename(filename: str | None) -> str:

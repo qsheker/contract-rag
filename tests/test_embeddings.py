@@ -347,3 +347,4 @@ def test_migration_allows_chunks_without_a_page_number() -> None:
 
     assert "alter table public.contract_chunks" in migration
     assert "alter column page_number drop not null" in migration
+
