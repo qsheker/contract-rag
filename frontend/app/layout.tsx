@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { THEME_BOOTSTRAP_SCRIPT } from "@/lib/theme";
 
 // shadcn's theme reads --font-sans and --font-mono, so the loaded faces are
 // bound to those names rather than to Geist-specific ones.
@@ -25,7 +26,16 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     <html
       lang="ru"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      // The bootstrap script below adds `dark` to this element before React
+      // hydrates, which is the whole point of it; without this React reports
+      // the class it did not render as a hydration mismatch.
+      suppressHydrationWarning
     >
+      <head>
+        {/* Before the first paint, so a dark-theme reader is not flashed a
+            white page on every navigation. */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_BOOTSTRAP_SCRIPT }} />
+      </head>
       {/* h-full, not min-h-full: the page must not grow past the viewport,
           or the chat pushes the header out of reach instead of scrolling
           its own message list. */}

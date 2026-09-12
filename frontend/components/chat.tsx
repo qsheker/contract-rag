@@ -1,159 +1,186 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Loader2, Send } from "lucide-react";
+import { Loader2, RotateCcw, Send, X } from "lucide-react";
 
 import { CitationBadges } from "@/components/citation-badges";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { MessageText } from "@/components/message-text";
+import { RetrievalDetails } from "@/components/retrieval-details";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { sendChatMessage, type ChatTurn, type Citation } from "@/lib/api";
+import type { ChatEntry } from "@/lib/chats";
 import { cn } from "cn";
 
-type ChatEntry = {
-  role: "user" | "assistant";
-  content: string;
-  citations?: Citation[];
-  // Kept per answer so a follow-up can show what retrieval actually searched
-  // for; it differs from the user's words exactly when condensation did work.
-  standaloneQuery?: string;
-};
-
-export function Chat() {
-  const [entries, setEntries] = useState<ChatEntry[]>([]);
+export function Chat({
+  entries,
+  isAnswering,
+  onAsk,
+  onRetry,
+  onCancel,
+}: {
+  entries: ChatEntry[];
+  isAnswering: boolean;
+  onAsk: (message: string) => void;
+  onRetry: (errorIndex: number) => void;
+  onCancel: () => void;
+}) {
   const [draft, setDraft] = useState("");
-  const [isAnswering, setIsAnswering] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [entries, isAnswering]);
 
-  async function send() {
+  function send() {
     const message = draft.trim();
     if (!message || isAnswering) {
       return;
     }
-
-    // The history sent to the backend is the conversation as it stood before
-    // this message, and it carries the user's literal words - condensation is
-    // the backend's job and must see what was actually typed.
-    const history: ChatTurn[] = entries.map((entry) => ({
-      role: entry.role,
-      content: entry.content,
-    }));
-
-    setEntries((previous) => [...previous, { role: "user", content: message }]);
     setDraft("");
-    setError(null);
-    setIsAnswering(true);
-
-    try {
-      const response = await sendChatMessage(message, history);
-      setEntries((previous) => [
-        ...previous,
-        {
-          role: "assistant",
-          content: response.answer,
-          citations: response.citations,
-          standaloneQuery: response.standalone_query,
-        },
-      ]);
-    } catch (chatError) {
-      setError(
-        chatError instanceof Error
-          ? chatError.message
-          : "Не удалось получить ответ.",
-      );
-    } finally {
-      setIsAnswering(false);
-    }
+    onAsk(message);
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
-        {entries.length === 0 && !isAnswering && (
-          <p className="py-8 text-center text-sm text-muted-foreground">
-            Спросите что-нибудь по договору — например, «Какой срок оплаты?», а
-            затем уточните: «а если просрочить?».
-          </p>
-        )}
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {/* One column, capped: a line of legal prose running the full width of
+            a desktop window is the thing that made this unreadable. */}
+        <div className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6">
+          {entries.length === 0 && !isAnswering ? (
+            <EmptyState />
+          ) : (
+            <div className="space-y-8">
+              {entries.map((entry, index) => (
+                <Message
+                  key={index}
+                  entry={entry}
+                  question={index > 0 ? entries[index - 1] : undefined}
+                  onRetry={() => onRetry(index)}
+                  canRetry={!isAnswering}
+                />
+              ))}
 
-        {entries.map((entry, index) => (
-          <ChatBubble key={index} entry={entry} />
-        ))}
-
-        {isAnswering && (
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" />
-            Ищем в договорах и собираем ответ…
-          </div>
-        )}
-
-        {error && (
-          <Alert variant="destructive">
-            <AlertTitle>Ответ не получен</AlertTitle>
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
-
-        <div ref={bottomRef} />
+              {isAnswering && (
+                <div className="flex items-center gap-3 text-sm text-muted-foreground">
+                  <Loader2 className="size-4 animate-spin" />
+                  Ищем в договорах и собираем ответ…
+                  <Button size="sm" variant="ghost" onClick={onCancel}>
+                    <X className="size-3.5" />
+                    Отменить
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+          <div ref={bottomRef} />
+        </div>
       </div>
 
-      <div className="flex items-end gap-2">
-        <Textarea
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              void send();
-            }
-          }}
-          placeholder="Вопрос по договору. Enter — отправить, Shift+Enter — новая строка."
-          rows={2}
-          disabled={isAnswering}
-          className="min-h-0 resize-none"
-        />
-        <Button
-          size="icon-lg"
-          onClick={() => void send()}
-          disabled={isAnswering || draft.trim().length === 0}
-          aria-label="Отправить"
-        >
-          <Send />
-        </Button>
+      <div className="border-t bg-background/80 backdrop-blur">
+        <div className="mx-auto w-full max-w-3xl px-4 py-4 sm:px-6">
+          <div className="flex items-end gap-2 rounded-2xl border bg-card p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring">
+            <Textarea
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  send();
+                }
+              }}
+              placeholder="Вопрос по договору…"
+              rows={1}
+              disabled={isAnswering}
+              className="max-h-40 min-h-9 resize-none border-0 bg-transparent px-2 py-1.5 shadow-none focus-visible:ring-0"
+            />
+            <Button
+              size="icon"
+              onClick={send}
+              disabled={isAnswering || draft.trim().length === 0}
+              aria-label="Отправить"
+            >
+              <Send className="size-4" />
+            </Button>
+          </div>
+          <p className="mt-2 text-center text-xs text-muted-foreground">
+            Enter — отправить, Shift+Enter — новая строка. Ответ строится только по
+            загруженным документам.
+          </p>
+        </div>
       </div>
     </div>
   );
 }
 
-function ChatBubble({ entry }: { entry: ChatEntry }) {
-  const isUser = entry.role === "user";
+function EmptyState() {
+  return (
+    <div className="py-16 text-center">
+      <h2 className="text-lg font-semibold">Спросите что-нибудь по договору</h2>
+      <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
+        Например: «Какой срок оплаты?» — а затем уточните: «а если просрочить?».
+        Каждый ответ подкреплён пунктом договора, который можно раскрыть и
+        прочитать целиком.
+      </p>
+    </div>
+  );
+}
+
+function Message({
+  entry,
+  question,
+  onRetry,
+  canRetry,
+}: {
+  entry: ChatEntry;
+  question: ChatEntry | undefined;
+  onRetry: () => void;
+  canRetry: boolean;
+}) {
+  if (entry.role === "user") {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[85%] rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm text-primary-foreground">
+          <p className="whitespace-pre-wrap">{entry.content}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (entry.role === "error") {
+    return (
+      <div className="space-y-3 rounded-xl border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm">
+        <p className="whitespace-pre-wrap">{entry.content}</p>
+        {question?.role === "user" && (
+          <Button size="sm" variant="outline" onClick={onRetry} disabled={!canRetry}>
+            <RotateCcw className="size-3.5" />
+            Повторить
+          </Button>
+        )}
+      </div>
+    );
+  }
+
+  // Shown only when condensation actually rewrote the question: with an empty
+  // history the backend returns the message unchanged, and repeating it back
+  // word for word trains the eye to skip the line that matters.
   const wasCondensed =
-    entry.standaloneQuery !== undefined && entry.standaloneQuery.length > 0;
+    question?.role === "user" && entry.standaloneQuery !== question.content;
 
   return (
-    <div className={cn("flex", isUser ? "justify-end" : "justify-start")}>
-      <div
-        className={cn(
-          "max-w-[85%] space-y-2 rounded-lg px-3 py-2 text-sm",
-          isUser ? "bg-primary text-primary-foreground" : "bg-muted",
-        )}
-      >
-        <p className="whitespace-pre-wrap">{entry.content}</p>
+    // No bubble around the answer: it is the long text on the page, and a tinted
+    // box around eight clauses is what made the old screen look like a dump.
+    <div className="space-y-4 text-[15px] leading-7">
+      <MessageText text={entry.content} />
 
-        {!isUser && wasCondensed && (
-          <p className="text-xs text-muted-foreground">
-            Поиск шёл по запросу: «{entry.standaloneQuery}»
-          </p>
-        )}
+      {wasCondensed && (
+        <p className="text-xs text-muted-foreground">
+          Поиск шёл по запросу: «{entry.standaloneQuery}»
+        </p>
+      )}
 
-        {!isUser && entry.citations && (
-          <CitationBadges citations={entry.citations} />
-        )}
+      <div className={cn("space-y-3 border-t pt-3", entry.citations.length === 0 && "pt-2")}>
+        <CitationBadges citations={entry.citations} excerpts={entry.excerpts} />
+        <RetrievalDetails excerpts={entry.excerpts} />
       </div>
     </div>
   );
