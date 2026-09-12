@@ -138,6 +138,45 @@ runs synchronously and takes seconds to minutes depending on the document.
 
 ---
 
+## Running it with Docker
+
+The images cover the API and the interface. Supabase stays hosted, and the
+migrations are still applied with the Supabase CLI (step 3 above) — the
+containers only read that database.
+
+```bash
+docker compose up --build
+```
+
+The interface is on http://localhost:3000 and the API on http://localhost:8000,
+the same as the local setup. `.env` is read by the API container, so fill it
+first.
+
+**Ollama stays on the host by default.** `localhost` inside a container is the
+container, so the API reaches the host through `host.docker.internal`; compose
+sets that up on Linux too. To run Ollama as a container instead:
+
+```bash
+docker compose --profile ollama up --build
+```
+
+```bash
+docker compose exec ollama ollama pull qwen2.5:7b
+```
+
+and set `OLLAMA_API_BASE=http://ollama:11434` in `.env`.
+
+Two things worth knowing:
+
+- The embedding model (~1.5 GB) is downloaded on first start and kept in a named
+  volume, so it survives `docker compose down`. The first start is slow; the
+  container is marked healthy only once the model is loaded.
+- `NEXT_PUBLIC_API_URL` is baked into the interface at build time, because it is
+  substituted into the bundle that runs in the browser. If the API is published
+  somewhere other than `http://localhost:8000`, set it before building.
+
+---
+
 ## Using it
 
 **A chat is about the documents uploaded into it.** Uploading scopes that
