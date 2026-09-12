@@ -1,510 +1,207 @@
 # contract-rag
 
-RAG-пайплайн для юридических договоров с обязательным цитированием пункта и страницы.
+Ask questions about legal contracts and get answers that cite the clause — and,
+where the format has pages, the page — they stand on. Upload your own PDF, DOCX
+or TXT and it becomes answerable immediately.
 
-## Требования
+A citation that cannot be checked is the failure this project is built to avoid,
+so an answer whose references do not match the excerpts it was given is rejected
+rather than shown.
 
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/)
+---
 
-## Начало работы
+## How it works
+
+```
+upload:   bytes → load_document → chunk_by_clause → embed_and_index → contract_chunks
+question: message + history → reformulate_query → retrieve(k=5)
+                                                      ↓
+                                        expand_with_related_clauses
+                                                      ↓
+                                               generate_answer → answer + citations
+```
+
+| Stage | Module | What it does |
+| --- | --- | --- |
+| Loader | `src/contract_rag/loader/` | PDF (page-aware), DOCX, TXT |
+| Chunker | `src/contract_rag/chunker/` | Splits on clause boundaries; strategies for dotted, verbose and heading-only numbering |
+| Embeddings | `src/contract_rag/embeddings/` | `ai-forever/ru-en-RoSBERTa`, upsert into Supabase pgvector |
+| Retrieval | `src/contract_rag/retriever/` | Cosine top-k via the `match_documents` RPC, scoped to chosen documents |
+| Generation | `src/contract_rag/generator/` | Structured, cited answers through LiteLLM |
+| Ingestion | `src/contract_rag/ingestion/` | Load → chunk → index, for one uploaded file |
+| HTTP | `api/` | `POST /chat`, `POST /documents` |
+| UI | `frontend/` | Next.js + shadcn/ui chat workspace |
+
+---
+
+## Prerequisites
+
+| Tool | Version | Notes |
+| --- | --- | --- |
+| Python | 3.12+ | `.python-version` pins 3.12 |
+| [uv](https://docs.astral.sh/uv/) | latest | dependency and venv management |
+| Node.js | 20+ | for the Next.js frontend |
+| [Supabase](https://supabase.com/) project | — | Postgres with `pgvector`; the free tier is enough |
+| [Supabase CLI](https://supabase.com/docs/guides/local-development/cli/getting-started) | latest | applies the migrations |
+| [Ollama](https://ollama.com/) | latest | only if you use a local generation model |
+
+The first question loads `ru-en-RoSBERTa` (about 1.5 GB) from Hugging Face and
+caches it locally. The API loads it at start-up so the wait does not land on a
+user's first question.
+
+---
+
+## Local setup
+
+### 1. Install dependencies
 
 ```bash
 uv sync
-uv run pytest
-uv run ruff check .
 ```
-
-## Текущее состояние
-
-Первый корпус публичных шаблонов договоров хранится в `corpus_raw/contracts/`.
-
-Loader принимает PDF, DOCX и TXT. `load_document()` выбирает загрузчик по
-расширению файла; кто знает формат заранее, может звать `load_pdf()`,
-`load_docx()` или `load_txt()` напрямую.
-
-```python
-from contract_rag.loader import LoaderError, NoTextLayerError, load_document
-
-try:
-    pages = load_document("corpus_raw/contracts/contract_01.pdf")
-except NoTextLayerError:
-    # OCR намеренно не входит в текущий Loader.
-    raise
-except LoaderError as error:
-    print(error.code, error.source_file)
-
-for page in pages:
-    print(page.page_number, page.source_file, page.text[:80])
-```
-
-| Формат | Страницы | `page_number` |
-| --- | --- | --- |
-| `.pdf` | реальные границы страниц из файла | `1, 2, 3, …` |
-| `.docx` | весь документ — одна «страница» | `None` |
-| `.txt` | весь файл — одна «страница» | `None` |
-
-**У DOCX и TXT номера страницы не существует.** У DOCX разбивка появляется только
-при рендеринге — она зависит от шрифтов и полей устройства и в файле не хранится;
-у TXT понятия страницы нет вовсе. Поэтому `page_number` там `None`, а не выдуманное
-число: **цитата по такому документу может содержать пункт, но не страницу.**
-Интерфейсу стоит предупреждать об этом при загрузке не-PDF файла.
-
-Расширение с неизвестным суффиксом — это `UnsupportedFormatError`; список
-поддерживаемых лежит в `SUPPORTED_EXTENSIONS`.
-
-Все форматы проходят одну и ту же очистку переносов (`join_hyphenation`), поэтому
-чанкеру не нужно знать, откуда пришёл текст. Удаление повторяющихся колонтитулов
-(`strip_boilerplate`) применяется только к PDF — ему нужно минимум две страницы.
-Из DOCX читаются и параграфы, и таблицы в порядке документа: реквизиты сторон и
-графики платежей обычно живут именно в таблицах.
-
-Chunking, определение пунктов, OCR и HTTP API остаются за пределами Loader.
-
-## Разбиение по пунктам
-
-Chunker применяет фиксированный приоритет generic-стратегий без определения типа
-договора: dotted numbering, verbose Article/Section, затем ненумерованные заголовки.
-
-```python
-from contract_rag.chunker import UnsupportedNumberingError, chunk_by_clause
-from contract_rag.loader import load_pdf
-
-pages = load_pdf("corpus_raw/contracts/contract_01.pdf")
-
-try:
-    chunks = chunk_by_clause(pages)
-except UnsupportedNumberingError:
-    # Автоматический token-based fallback намеренно отсутствует.
-    raise
-
-for chunk in chunks:
-    print(chunk.clause_id, chunk.page_number, chunk.detected_strategy)
-```
-
-Преамбула сохраняется отдельным чанком с `clause_id=None`. Если пункт продолжается
-на следующей странице, он остаётся одним чанком, привязанным к странице начала.
-
-### Что считается границей пункта
-
-Номер в начале строки — ещё не начало пункта. В PDF перенос строки выталкивает
-перекрёстную ссылку в начало строки («…in accordance with clause\n6.2.6 shall be
-applied»), и она выглядит точно как открытие пункта. Различает их то, **завершает
-ли номер сам себя**:
-
-```
-4.9.3. для возмещения неотработанного аванса;      → пункт 4.9.3
-6.2.6 shall be applied as stated.                  → ссылка, не граница
-```
-
-Нумерованный список ставит после номера точку; проза, цитирующая номер пункта, —
-нет. Раньше вместо этого требовалась заглавная буква после номера, и это
-отбрасывало все русские подпункты, которые законно начинаются со строчной, потому
-что продолжают фразу родительского пункта. На реальном трудовом договоре так
-терялось 125 границ из 231.
-
-Однуровневые заголовки разделов (`6. ПРАВА И ОБЯЗАННОСТИ РАБОТОДАТЕЛЯ`) тоже
-границы — когда текст после номера читается как заголовок, а не как предложение.
-Без этого целый раздел оказывался внутри последнего пункта предыдущего, и любой
-факт из него цитировался под чужим номером. Заголовочность проверяет один
-предикат на два места, чтобы `dotted_numbering` и `heading_only` не могли
-разойтись в том, что считать заголовком.
-
-**Неверная атрибуция опаснее потери текста.** Цитата на чужой пункт формально
-валидна, проходит проверку генерации и указывает не туда. Именно так выглядел
-первый найденный случай: подпункты `5.2.1`–`5.2.7` лежали внутри чанка `5.2`,
-модель прочитала их номера в тексте и сослалась на них — а проверка цитат
-ответила, что таких пунктов ей не давали. Модель определила источник верно;
-ошибался чанкер.
-
-### Контекст в эмбеддинге, дословный текст в цитате
-
-Мелкое разбиение создаёт обратную проблему: `3.1.1. пятидневная рабочая неделя`
-сам по себе — обрывок, без шапки `3.1. Работнику устанавливается рабочее время:`
-он ни о чём. Поэтому `Chunk.context` несёт заголовки, под которыми стоит чанк
-(первые строки предков), и индексатор подставляет их **только в кодируемый
-текст**. В поле `text` — и, значит, в цитате — остаётся ровно то, что написано в
-договоре.
-
-Контекст добавляется лишь чанкам короче `CONTEXT_MAX_CHARS` (400 символов). Это
-измерено, а не выбрано: подстановка заголовков во все чанки делает длинные
-топикально шире, они вытесняют правильные ответы из top-5, и на eval-сете это
-стоило одного вопроса (12/14 → 11/14). Регрессия начинается выше ~600 символов,
-а 400 при этом обрамляет 93% реальных обрывков.
-
-### Стратегии на эталонном корпусе
-
-| Файл | Результат |
-| --- | --- |
-| `contract_01.pdf` | `dotted_numbering` |
-| `contract_02.pdf` | `verbose_numbering` |
-| `contract_03.pdf` | `heading_only` |
-| `contract_04.pdf` | `UnsupportedNumberingError` — плоская нумерация вне текущего набора стратегий |
-| `contract_05.pdf` | `heading_only` |
-
-## Миграции
-
-Схема базы живёт в `supabase/migrations/` и накатывается Supabase CLI — вручную
-через SQL Editor ничего копировать не нужно.
 
 ```bash
-brew install supabase/tap/supabase
-supabase login
-supabase link --project-ref <project-ref>
-supabase db push
+npm install --prefix frontend
 ```
 
-`supabase login` и `link` делаются один раз на машину: CLI спрашивает пароль базы
-и хранит привязку в `supabase/.temp/`, который исключён из Git. Дальше
-`supabase db push` применяет только те миграции, которых ещё нет в базе, и сам
-ведёт их учёт.
-
-Обе текущие миграции идемпотентны (`create table if not exists`,
-`create or replace function`), поэтому `db push` на уже настроенную базу
-безопасен и просто зафиксирует их как применённые.
-
-Новая миграция создаётся так — CLI сам проставит таймстамп в имени, порядок
-применения определяется именно им:
-
-```bash
-supabase migration new add_something
-```
-
-| Файл | Что делает |
-| --- | --- |
-| `*_create_contract_chunks.sql` | расширение pgvector, таблица `contract_chunks` |
-| `*_create_match_documents.sql` | RPC-функция `match_documents` для top-k поиска |
-| `*_allow_null_page_number.sql` | `page_number` становится nullable — для DOCX/TXT |
-
-## Эмбеддинги и Supabase
-
-Индексатор использует `ai-forever/ru-en-RoSBERTa` и хранит 1024-мерные векторы
-в таблице Supabase `contract_chunks`. Исходный текст и все метаданные чанка
-записываются вместе с вектором.
-
-Перед первым запуском:
-
-1. Создайте или выберите проект Supabase.
-2. Накатите миграции через Supabase CLI (см. «Миграции» ниже).
-3. Создайте локальный `.env` — этот файл исключён из Git:
+### 2. Configure the environment
 
 ```bash
 cp .env.example .env
 ```
 
-Все переменные и их назначение описаны в `.env.example`.
+Fill in `.env`:
 
-Пример индексации уже подготовленного списка чанков:
-
-```python
-from contract_rag.embeddings import create_supabase_client_from_env, embed_and_index
-
-supabase = create_supabase_client_from_env()
-embed_and_index(chunks, supabase)
-```
-
-`embed_and_index()` сам добавляет `search_document: ` перед кодированием и
-делает upsert по `id`, поэтому повторный запуск не создаёт дубликаты. В поле
-`text` всегда остаётся полный текст. Если вход длиннее 512 токенов, только вход
-модели автоматически обрезается, а лог содержит warning с исходным файлом и
-номером пункта.
-
-Базовый ID имеет формат `source_file::clause_id` или
-`source_file::preamble`. В многоязычных документах номер пункта может повторяться.
-Чтобы не перезаписать один язык другим, коллизии получают детерминированный суффикс
-страницы и порядкового номера.
-
-## Поиск по векторам
-
-`retrieve()` кодирует запрос с префиксом `search_query: ` и вызывает Postgres-функцию
-`match_documents` через `supabase.rpc()`. Обычный клиент PostgREST не умеет строить
-`order by embedding <=> ...`, поэтому сортировка живёт в SQL, а Python только
-передаёт вектор и `k`.
-
-```python
-from contract_rag.retriever import retrieve
-
-for hit in retrieve("Куда передаются неразрешённые споры?", k=5):
-    print(hit.similarity, hit.chunk.clause_id, hit.chunk.page_number, hit.chunk.source_file)
-```
-
-Возвращается `RetrievedChunk`: целый `Chunk` со всеми метаданными плюс `chunk_id`
-из базы и `similarity`. Текст чанка не обрезается и не переформулируется.
-Список отсортирован по убыванию `similarity`, длина — не больше `k`.
-`k <= 0` — это `ValueError`; пустая таблица — пустой список, а не исключение.
-
-Клиент можно внедрить явно — так же, как в индексаторе, и так же тестировать
-фейком без сети:
-
-```python
-from contract_rag.retriever import SupabaseRetriever
-
-hits = SupabaseRetriever(supabase_client).retrieve("payment schedule", k=3)
-```
-
-### Решения
-
-- **Косинус (`<=>`).** Модель отдаёт нормализованные векторы — для них pgvector
-  рекомендует именно косинусное расстояние. `similarity = 1 - distance`.
-- **ANN-индекса нет.** На десятках чанков sequential scan даёт точный результат
-  (recall 100%) и не требует обслуживания. HNSW окупается ближе к ~1 млн строк.
-- **Reranking не входит в retrieval.** Он добавляется поверх, отдельным решением.
-
-### Качество на mini eval-сете
-
-Разметка и скрипт замера — в `eval/`. Метрика: доля вопросов, у которых ожидаемый
-пункт попал в top-k. Замер на 12 размеченных вопросах (5 ru/kk, 7 en) по корпусу
-из 210 проиндексированных чанков:
-
-| Метрика | Результат |
-| --- | --- |
-| recall@1 | 8/12 = 0.67 |
-| recall@3 | 11/12 = 0.92 |
-| recall@5 | 12/12 = 1.00 |
-
-Сет маленький и составлен по содержимому уже проиндексированного корпуса, поэтому
-`recall@5 = 1.00` означает «на текущем масштабе retrieval не теряет ни одного
-языка», а не «поиск решён». Число нужно как база для сравнения: любое будущее
-изменение (reranking, другая модель, другой chunking) сверяется с ним.
-
-## Генерация ответа
-
-`generate_answer()` собирает ответ строго по переданным чанкам и обязан подкрепить
-каждое утверждение цитатой на пункт и страницу.
-
-```python
-from contract_rag.generator import generate_answer
-from contract_rag.retriever import retrieve
-
-hits = retrieve("Куда передаются неразрешённые споры?", k=5)
-answer = generate_answer("Куда передаются неразрешённые споры?", [hit.chunk for hit in hits])
-
-print(answer.text)
-for citation in answer.citations:
-    print(citation.source_file, citation.clause_id, citation.page_number)
-```
-
-Ответ приходит как схема, а не как свободный текст: `Answer.text` плюс
-`Answer.citations` из `Citation(clause_id, page_number, source_file)`. Если в
-переданных чанках ответа нет, модель обязана сказать это прямо и вернуть пустой
-список цитат — выдумывать запрещено промптом.
-
-### Смена провайдера
-
-Провайдер задаётся строкой модели в `GENERATION_MODEL`, вызов идёт через
-`litellm.completion()` — один и тот же код работает с Ollama, Anthropic, OpenAI,
-Gemini, Bedrock и десятками других. Переключение — это правка `.env`, а не кода:
-
-| `GENERATION_MODEL` | Что нужно ещё |
-| --- | --- |
-| `ollama/qwen2.5:7b` | установленный Ollama и `ollama pull qwen2.5:7b` |
-| `anthropic/claude-sonnet-4-6` | `ANTHROPIC_API_KEY` в `.env` |
-| `openai/gpt-4o` | `OPENAI_API_KEY` в `.env` |
-
-Значения по умолчанию у переменной **нет**: без неё код падает с явной ошибкой
-конфигурации. Молчаливый фолбэк на локальную модель, которая может быть не
-запущена, превратил бы ошибку настройки в непонятный таймаут.
-
-Локальная модель — единственный вариант, при котором тексты договоров не покидают
-машину. Перед переключением на платный API это стоит учитывать отдельно от цены.
-
-### Что считается ошибкой
-
-- Провайдер недоступен, вернул не-JSON или payload не по схеме → `GenerationError`.
-  Отката на разбор свободного текста нет: он бы вернул те самые ответы без
-  проверяемых цитат, ради которых всё и затевалось.
-- **Цитата на пункт, которого модели не давали, → `GenerationError`.** Совпадение
-  проверяется по тройке `source_file` + `clause_id` + `page_number`. Выдуманная
-  ссылка на пункт договора хуже, чем отсутствие ответа.
-
-### Качество
-
-`eval/run_generation_eval.py` считает на тех же 12 вопросах: доля ответов с
-цитатой, доля попаданий в ожидаемый пункт, доля отказов «не найдено» и доля
-отклонённых ответов. Эти метрики считаются без judge-модели; оценка
-faithfulness — отдельная задача.
-
-```bash
-uv run python eval/run_generation_eval.py
-```
-
-Прогон на `ollama/qwen2.5:7b`, retrieval `k=5`, корпус из 210 чанков:
-
-| Метрика | Результат |
-| --- | --- |
-| Ответ с цитатой | 10/12 |
-| Процитирован ожидаемый пункт | 9/12 = 0.75 |
-| Отказ «ответа нет в контексте» | 1/12 |
-| Отклонено из-за выдуманной цитаты | 1/12 |
-
-Три случая стоит разобрать отдельно — они показывают, где именно система
-ошибается:
-
-- **q08 — модель выдумала подпункты.** Получив `Section 10.1.1`, она сослалась на
-  `Section 10.1.1.1`, `10.1.1.2` и `10.1.1.3`: достроила правдоподобную нумерацию,
-  которой в договоре нет. Проверка цитат отклонила ответ. Без неё пользователь
-  получил бы три ссылки на несуществующие пункты — и такой ответ выглядел бы
-  убедительнее правильного.
-- **q02 — ложный отказ.** Retrieval нашёл нужный пункт (ранг 3), но модель решила,
-  что ответа в контексте нет. Это ошибка генерации, а не поиска: 7B-модель
-  осторожничает.
-- **q05 (казахский) — ответ не по тому пункту.** Здесь виноват retrieval: нужный
-  пункт был на самой границе top-5 (ранг 5), и модель предпочла тот, что выше.
-
-Итог: `0.75` — это качество *связки* поиск+генерация, оно ниже `recall@5 = 1.00`
-у одного поиска. Разница в 3 вопроса и есть цена генерации на маленькой локальной
-модели. Смена `GENERATION_MODEL` на более крупную — первое, что стоит проверить,
-если этого мало.
-
-## Чат и загрузка документов
-
-Полноценный интерфейс: чат с историей вопросов и ответов плюс загрузка своих
-документов, которые сразу проходят весь пайплайн и становятся доступны для
-вопросов.
-
-```bash
-uvicorn api.main:app --reload --port 8000   # backend, из корня репозитория
-npm run dev --prefix frontend               # UI на http://localhost:3000
-```
-
-Backend поднимает модель эмбеддингов в lifespan-хуке, до первого запроса:
-`ru-en-RoSBERTa` грузится десятки секунд, и платить это в первом же вопросе
-пользователя — значит показать ему зависший чат. В логе это видно как
-`Loading the embedding model` → `Embedding model ready`.
-
-Оба эндпоинта объявлены обычным `def`, а не `async def`: retrieval, генерация и
-индексация блокируют на секунды, а синхронный эндпоинт Starlette выполняет в
-отдельном потоке, вместо того чтобы держать event loop.
-
-### `POST /chat`
-
-```
-{"message": "а на сколько дней?", "history": [{"role": "user", "content": "..."}]}
-→ {"answer": "...", "citations": [...], "standalone_query": "..."}
-```
-
-Перед поиском follow-up переформулируется в самостоятельный вопрос
-(`api/reformulate.py`): retrieval видит одну строку и никакого диалога, поэтому
-«а на сколько дней?» сам по себе не эмбеддится ни во что полезное.
-
-```
-история: «Нужно ли уведомлять о досрочном расторжении?» → «Да, письменно»
-вопрос:  «а на сколько дней?»
-запрос:  «На сколько дней нужно уведомить о досрочном расторжении договора?»
-```
-
-Решения:
-
-- **Та же модель, что и в генерации** (`GENERATION_MODEL`). Переформулировка
-  механическая, и self-preference bias, из-за которого судья в eval обязан быть
-  другой моделью, здесь неприменим.
-- **Пустая история — вызова нет.** Разрешать нечего, `standalone_query` равен
-  сообщению буквально.
-- **Сбой переформулировки не роняет чат.** Любая ошибка — провайдер недоступен,
-  ответ не по схеме, пустая строка — это warning в лог и фолбэк на исходное
-  сообщение. Непереформулированный follow-up — плохой поисковый запрос, а не
-  сломанный.
-- **Structured output, а не свободный текст.** 7B-модель на просьбу вернуть
-  вопрос регулярно добавляет «Sure, here is the standalone question:», и эта
-  преамбула ушла бы прямо в эмбеддинг запроса. Схема `StandaloneQuery` делает её
-  невозможной — та же идиома, что в `generator.py` и `eval/judge.py`.
-- **В историю уходит только хвост** (`HISTORY_TURN_LIMIT`, 6 сообщений):
-  follow-up ссылается на то, что сказано только что.
-
-CORS открыт явно для `localhost:3000` и `127.0.0.1:3000`, без wildcard — API
-ходит в Supabase и к провайдеру генерации от имени разработчика.
-
-Неожиданные исключения перехватываются middleware, добавленным *до* CORS (то
-есть оказывающимся внутри него), и отдаются как JSON 500 с текстом ошибки.
-Стандартный 500 Starlette собирается вне стека middleware, поэтому идёт без
-CORS-заголовков — браузер отбрасывает его раньше, чем страница увидит статус, и
-любой сбой бэкенда читается в UI как «Failed to fetch». Причина нужна там, куда
-пользователь смотрит, а не только в логе uvicorn.
-
-### `POST /documents`
-
-```
-multipart file → {"filename": "...", "chunks_indexed": 31, "warnings": [...]}
-```
-
-`ingest_document()` — первое место в проекте, где цепочка записи существует как
-функция: `load_document` → `chunk_by_clause` → `embed_and_index`.
-
-Решения:
-
-- **Синхронно.** На масштабе одного пользователя очередь добавила бы
-  подвижную деталь, не убрав ожидание. Обработка занимает от секунд до минут,
-  и UI всё это время показывает статус загрузки.
-- **Ничего не индексируется частично.** Весь пайплайн проходит до первой записи:
-  нечитаемый файл или нумерация, которую чанкер не берёт, падают раньше, чем
-  что-либо попадёт в базу.
-- **Имя файла обрезается до basename.** Оно уходит в `Chunk.source_file`, в `id`
-  строки и в цитаты, поэтому путь — хоть от браузера, хоть traversal — не
-  сохраняется.
-- **Байты пишутся во временный каталог под собственным именем**, потому что
-  загрузчики открывают пути, а не байты. Страницы после загрузки
-  переклеймливаются на исходное имя: временный каталог у каждой загрузки свой, а
-  `id` (`source_file::clause_id`) меняться не должен, иначе повторная загрузка
-  того же файла проиндексировала бы вторую копию вместо замены первой.
-- **Повторная загрузка заменяет документ целиком.** Upsert по `id` избавляет от
-  дублей, но не от остатков: если пункт 3.4 из файла удалили, строка
-  `file.pdf::3.4` осталась бы в индексе и её всё ещё нашёл бы `retrieve()`.
-  Поэтому после успешного upsert `delete_stale_chunks()` убирает строки этого
-  `source_file`, которых текущий прогон не писал — именно после, чтобы сбой на
-  середине оставил предыдущую версию документа, а не пустоту.
-- **Удаляются по списку устаревших, а не «всё кроме выживших».** Значения
-  фильтра PostgREST едут в query string, а `id` — это `source_file::clause_id`:
-  длинное неascii-имя раздувается до девяти URL-байт на символ, поэтому
-  перечисление выживших целого документа перебивает лимит строки запроса, и
-  шлюз отвечает голым `Bad Request`. Назвать только уходящие обычно значит не
-  назвать ничего: у первой загрузки устаревших строк нет и DELETE не уходит
-  вовсе. Остаток нарезается батчами по закодированной длине (`FILTER_BUDGET_BYTES`),
-  а не по количеству — сколько `id` влезет, зависит от имени файла.
-
-Ошибки — 4xx с понятным текстом, а не 500:
-
-| Ситуация | Код | Ответ |
+| Variable | Required | Meaning |
 | --- | --- | --- |
-| Формат не PDF/DOCX/TXT | 415 | `only PDF, DOCX and TXT files can be indexed` |
-| Скан без текстового слоя | 422 | `carries no text layer … OCR is not part of the pipeline` |
-| Битый PDF/DOCX, не-UTF-8 TXT | 422 | `is not a readable PDF` и т.п. |
-| Нумерацию не берёт чанкер | 422 | `no clause numbering the chunker recognises` |
-| Пустой файл / нет имени | 400 | |
-| Больше 20 МБ | 413 | |
+| `SUPABASE_URL` | yes | Dashboard → Project Settings → API |
+| `SUPABASE_KEY` | yes | the same page; the service role key if you want to write |
+| `GENERATION_MODEL` | yes | LiteLLM model string, e.g. `ollama/qwen2.5:7b` |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | only for that provider | not needed with Ollama |
 
-Текст ошибки собирается из `LoaderErrorCode`, а не из `str(error)`: сообщения
-загрузчика называют временный путь, который пользователю ничего не говорит.
+There is deliberately no default generation model: silently falling back to a
+local model that may not be running turns a configuration mistake into a
+timeout.
 
-**DOCX и TXT возвращают warning об отсутствии страниц** — и API, и UI говорят
-об этом сразу после индексации, а не когда пользователь удивится пустому номеру
-страницы в цитате.
+The frontend calls `http://localhost:8000` unless `NEXT_PUBLIC_API_URL` says
+otherwise.
 
-### UI
+### 3. Create the database schema
 
-`frontend/` — Next.js (App Router) + shadcn/ui.
-
-- В чате показывается **буквальное сообщение пользователя**, а под ответом —
-  строка «Поиск шёл по запросу: …». Так видно, что именно ушло в retrieval, и
-  переформулировка не выглядит подменой вопроса.
-- Цитаты — бейджи под ответом: `файл · п. 2.3 · стр. 2`. Для DOCX и TXT вместо
-  номера страницы стоит «без страницы»: пропуск читатель истолковал бы сам, а
-  явная надпись — нет.
-- Dropzone показывает `Обрабатываем <файл>` со спиннером всё время
-  синхронной индексации.
-- Адрес backend берётся из `NEXT_PUBLIC_API_URL`, по умолчанию
-  `http://localhost:8000`.
-
-### Тесты
+Link the project once, then push the migrations in `supabase/migrations/`:
 
 ```bash
-uv run pytest tests/test_reformulate.py tests/test_api.py tests/test_ingestion.py -v
+supabase link --project-ref <your-project-ref>
 ```
 
-Логирование настраивается в `api/main.py`: uvicorn поднимает только свои
-логгеры, оставляя корневой на fallback-обработчике уровня WARNING, поэтому без
-`basicConfig` каждый `logger.info` проекта уходил в никуда.
+```bash
+supabase db push
+```
 
-Ни один тест не ходит в сеть: провайдер подменяется через `completion_fn`,
-Supabase — фейковым клиентом, как в `test_embeddings.py`. `TestClient` намеренно
-используется без контекстного менеджера — вход в него запустил бы lifespan и
-загрузил настоящую модель эмбеддингов.
+This creates the `contract_chunks` table, the `match_documents` search function
+and the vector extension. Having a migration in the repository and having it
+applied are different things — check with `supabase migration list --linked`.
+
+### 4. Start the generation model
+
+With Ollama, pull the model once:
+
+```bash
+ollama pull qwen2.5:7b
+```
+
+Ollama serves a model with a 4096-token window by default whatever the model
+supports; the API asks for a larger one explicitly, so no configuration is
+needed here.
+
+To use a hosted provider instead, change `GENERATION_MODEL` and add its key —
+no code changes.
+
+---
+
+## Running it
+
+Backend (port 8000):
+
+```bash
+uv run uvicorn api.main:app --reload --port 8000
+```
+
+Frontend (port 3000):
+
+```bash
+npm run dev --prefix frontend
+```
+
+Open http://localhost:3000, drop a contract into the sidebar, and ask. Indexing
+runs synchronously and takes seconds to minutes depending on the document.
+
+---
+
+## Using it
+
+**A chat is about the documents uploaded into it.** Uploading scopes that
+conversation to that file, and the header shows which one; clearing the scope
+searches every indexed document. A chat that never uploaded anything searches
+all of them.
+
+**Every answer carries its excerpts.** Each citation badge opens into the
+contract's own words, and "what search found" lists everything that reached the
+model, with similarity scores — so a thin answer can be explained without
+reading the server log.
+
+**Follow-up questions are condensed first.** "And for how many days?" is
+rewritten into a standalone question before retrieval; the line above the
+citations shows the rewritten query whenever it differs from what you typed.
+
+**DOCX and TXT have no pages,** so their citations name a clause and say "без
+страницы" instead of inventing a page number.
+
+---
+
+## API
+
+| Endpoint | Body | Returns |
+| --- | --- | --- |
+| `POST /chat` | `{message, history, source_files}` | `{answer, citations, standalone_query, excerpts}` |
+| `POST /documents` | multipart `file` | `{filename, chunks_indexed, warnings}` |
+
+`source_files` is optional; an empty list searches the whole index. Unsupported
+formats, unreadable files and numbering the chunker does not recognise answer
+with 4xx and a message meant for a person, not a stack trace.
+
+---
+
+## Tests
+
+```bash
+uv run pytest
+```
+
+No test touches the network: providers, the embedding model and Supabase are all
+faked. The evaluation harness in `eval/` does hit live services and is therefore
+kept out of `tests/` and run by hand.
+
+```bash
+uv run ruff check api src tests
+```
+
+```bash
+npm run lint --prefix frontend
+```
+
+---
+
+## Known limitations
+
+- **Repeated clause numbers.** An annex that restarts numbering produces a
+  second `5.1`; the stored rows are distinguished by a suffix, but a citation
+  shows only "п. 5.1".
+- **Small local models drift.** `qwen2.5:7b` can switch language mid-answer over
+  a mixed-language corpus. The question's language is named explicitly in the
+  prompt, which holds at the start of an answer but is not a guarantee.
+- **Uploads are processed synchronously.** A large document blocks its request
+  for as long as it takes to index.
+- **A partial index is possible** if the connection drops between upsert batches
+  of a document larger than 50 chunks.
+- **DOCX content controls are skipped.** The loader walks direct children of the
+  document body, so text inside `w:sdt`, text boxes or headers is not read.
